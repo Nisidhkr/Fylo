@@ -1,0 +1,144 @@
+# PeerLink - P2P File Sharing Application
+
+PeerLink is a peer-to-peer file sharing application for files of any size
+(tested with multi-GB transfers, designed for 40 GB+). A sender uploads a
+file and gets an invite code; anyone with the code downloads the file
+directly from the sender's machine over a custom binary protocol with
+authentication, resume, and integrity verification.
+
+## Features
+
+- Drag-and-drop upload with progress, streamed to disk (constant memory — no
+  file-size limit from RAM)
+- One-string invite codes (`port-token`) with per-transfer authentication
+- Custom binary transfer protocol ([docs/PROTOCOL.md](docs/PROTOCOL.md)):
+  version, manifest (name, size, SHA-256, chunk size, transfer ID), byte-range
+  requests, completion marker
+- Zero-copy sending (`FileChannel.transferTo` / `sendfile`) and parallel
+  segmented downloading
+- Exact byte-offset resume after disconnects — already-received bytes are
+  never re-downloaded (browser downloads resume via HTTP `Range` too)
+- SHA-256 whole-file verification with per-chunk CRC32C repair: corrupted
+  chunks are located and re-fetched instead of failing the transfer
+- Multiple clients can download the same share concurrently
+- Minimal, responsive UI
+
+## Project Structure
+
+- `src/main/java/p2p`: Java backend
+  - `App.java` — entry point
+  - `controller/FileController.java` — HTTP gateway (`/upload`, `/download`)
+  - `service/FileSharer.java` — registry of active shares
+  - `protocol/` — binary wire protocol (frames, manifest, errors)
+  - `transfer/` — `FileSender`, `FileReceiver`, `PeerClient`, resume state,
+    progress tracking, network tuning presets
+  - `security/` — transfer tokens
+- `ui/`: Next.js frontend (`src/app`, `src/components`)
+- `docs/`: [PROTOCOL.md](docs/PROTOCOL.md) (wire format),
+  [ARCHITECTURE.md](docs/ARCHITECTURE.md) (design, performance, security)
+
+## Prerequisites
+
+- **Java 25** (build target; installed by the upgrade tooling at `~/.jdk/jdk-25.0.2` —
+  make sure `JAVA_HOME` points there, see below)
+- Node.js 18+ and npm
+- Maven
+
+## Getting Started
+
+### Build and run (after pulling changes, run these to refresh everything)
+
+Backend — terminal 1:
+
+```bash
+# One-time per shell (or add to ~/.zshrc): use the Java 25 JDK
+export JAVA_HOME="$HOME/.jdk/jdk-25.0.2"
+export PATH="$JAVA_HOME/bin:$PATH"
+
+mvn clean package
+java -jar target/p2p-1.0-SNAPSHOT.jar
+```
+
+> Without `JAVA_HOME` set, Maven uses the system Java 21 and fails with
+> `release version 25 not supported`.
+
+The API server listens on port **9090** by default (8080 is commonly taken by
+Jenkins). To use a different port, set it on both halves:
+
+```bash
+PORT=8081 java -jar target/p2p-1.0-SNAPSHOT.jar          # backend
+BACKEND_URL=http://localhost:8081 npm run dev             # frontend (from ui/)
+```
+
+The API server starts on port 9090.
+
+Frontend — terminal 2:
+
+```bash
+cd ui
+npm install
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+Tests only:
+
+```bash
+mvn test
+```
+
+### Quick start scripts
+
+`./start.sh` (Linux/macOS) or `start.bat` (Windows) build the backend, start
+the server, and launch the frontend dev server.
+
+## How It Works
+
+1. **Send** — drop a file in the UI. It streams to the backend, which starts
+   a `FileSender` on a random high port with a fresh 128-bit access token and
+   returns the invite code `port-token`.
+2. **Share** — send the invite code to the recipient.
+3. **Receive** — the recipient enters the code. Their browser streams the file
+   straight to disk through the backend gateway, which speaks the binary
+   protocol to the sender. Nothing is served — not even the filename — without
+   the correct token.
+4. **Resilience** — interrupted protocol downloads resume from the exact byte
+   offset; completed files are verified against the manifest's SHA-256 before
+   being accepted.
+
+## Architecture
+
+```
+Browser ──HTTP──► FileController (gateway)
+                    │ POST /upload      stream to disk → FileSharer.offer()
+                    │ GET  /download    PeerClient → stream-through (Range support)
+                    ▼
+                  FileSharer ─── one FileSender per shared file
+                                   N concurrent clients, zero-copy sendfile
+Peer ◄──PeerLink binary protocol──┘
+  FileReceiver: parallel segments, .resume metadata, SHA-256 + CRC32C repair
+```
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full design review,
+bottleneck analysis, memory budget, network tuning (LAN/WAN/high-latency
+presets), and benchmark numbers.
+
+## Security
+
+- Per-transfer 128-bit bearer tokens (constant-time comparison); auth happens
+  before any metadata is revealed
+- Path traversal protection on filenames in both directions
+- Range and checksum requests are bounds-checked
+- Not yet included (recommended for hostile networks): TLS, token expiry,
+  rate limiting — see the security section of
+  [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+## Deployment
+
+For detailed deployment instructions, see [DEPLOYMENT.md](DEPLOYMENT.md).
+Note: deployment images must provide a Java 21 runtime.
+
+## License
+
+MIT
