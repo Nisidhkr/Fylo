@@ -7,7 +7,9 @@
       "Bash(awk '{print $9, $5}')",
       "Bash(cat /tmp/peerlink-server.log; echo ---; ss -tlnp 2>/dev/null | grep 8080)",
       "Read(//tmp/**)",
-      "Bash(rm -f /tmp/smoke-test.bin /tmp/smoke-out.bin /tmp/smoke-tail.bin /tmp/peerlink-server.log && echo cleaned)"
+      "Bash(rm -f /tmp/smoke-test.bin /tmp/smoke-out.bin /tmp/smoke-tail.bin /tmp/peerlink-server.log && echo cleaned)",
+      "Bash(ip -4 addr show)",
+      "Read(//mnt/wsl/**)"
     ],
     "additionalDirectories": [
       "/tmp"

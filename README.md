@@ -8,6 +8,19 @@ authentication, resume, and integrity verification.
 
 ## Features
 
+**Two transfer modes, one engine** — internet sharing via invite codes, and
+zero-configuration local network sharing ([docs/LAN-MODE.md](docs/LAN-MODE.md)):
+
+- **Nearby devices** appear automatically via mDNS/DNS-SD (Bonjour-compatible);
+  select a device, send files or whole folders — no upload to any server, no
+  IP/port entry, no internet required
+- **Device approval**: "X wants to send 5 files (12.4 GB) — Accept / Reject",
+  with optional "always accept" pairing (trusted devices)
+- **Transfer queue** with progress, speed, ETA, pause/resume/cancel, and history
+- Online/offline presence with heartbeats and last-seen tracking
+
+Plus the original internet mode:
+
 - Drag-and-drop upload with progress, streamed to disk (constant memory — no
   file-size limit from RAM)
 - One-string invite codes (`port-token`) with per-transfer authentication
@@ -27,11 +40,15 @@ authentication, resume, and integrity verification.
 
 - `src/main/java/p2p`: Java backend
   - `App.java` — entry point
-  - `controller/FileController.java` — HTTP gateway (`/upload`, `/download`)
+  - `controller/FileController.java` — HTTP gateway (`/upload`, `/download`,
+    `/lan/*`, `/transfers`)
   - `service/FileSharer.java` — registry of active shares
   - `protocol/` — binary wire protocol (frames, manifest, errors)
-  - `transfer/` — `FileSender`, `FileReceiver`, `PeerClient`, resume state,
-    progress tracking, network tuning presets
+  - `transfer/` — `FileSender`, `FileReceiver`, `PeerClient`,
+    `TransferManager` (queue/pause/resume), resume state, progress tracking,
+    network tuning presets
+  - `device/` — identity, registry, mDNS discovery, presence/heartbeats
+  - `lan/` — offers, approval, device-to-device control plane
   - `security/` — transfer tokens
 - `ui/`: Next.js frontend (`src/app`, `src/components`)
 - `docs/`: [PROTOCOL.md](docs/PROTOCOL.md) (wire format),
@@ -95,6 +112,17 @@ the server, and launch the frontend dev server.
 
 ## How It Works
 
+### Local network mode
+
+1. Open PeerLink on two devices on the same network — they discover each
+   other automatically (mDNS) and appear under **Nearby**.
+2. Pick a device, choose files or a folder. The other side gets an approval
+   popup; on accept, the bytes flow **directly between the two machines**
+   over the binary protocol (parallel segments, resumable, SHA-256 verified)
+   into `~/Downloads/PeerLink`. Progress lives in the **Transfers** tab.
+
+### Internet mode
+
 1. **Send** — drop a file in the UI. It streams to the backend, which starts
    a `FileSender` on a random high port with a fresh 128-bit access token and
    returns the invite code `port-token`.
@@ -106,6 +134,29 @@ the server, and launch the frontend dev server.
 4. **Resilience** — interrupted protocol downloads resume from the exact byte
    offset; completed files are verified against the manifest's SHA-256 before
    being accepted.
+
+## Troubleshooting LAN mode
+
+- **`ECONNREFUSED 127.0.0.1:9090` in the frontend log** — the Java backend
+  isn't running. Start it first (`java -jar target/p2p-1.0-SNAPSHOT.jar`),
+  then the UI; the dev proxy just forwards `/api/*` to it.
+- **Setup for two laptops** — run the *backend* on both (each backend is the
+  "device"); run the frontend on whichever machine you're using. The frontend
+  only ever talks to its own local backend.
+- **Devices don't appear, and a machine runs WSL2** — WSL2's default NAT
+  network (a virtual `172.x` subnet) blocks both mDNS multicast *and* inbound
+  connections, so a WSL2 node can neither be discovered nor receive transfers.
+  Fix one of these ways:
+  1. Enable **mirrored networking** (Windows 11 22H2+): put
+     `[wsl2]` / `networkingMode=mirrored` in `C:\Users\<you>\.wslconfig`, run
+     `wsl --shutdown`, restart, and allow Java/port 9090 through Windows
+     Firewall. WSL then shares the laptop's real LAN address.
+  2. Or run the backend **on Windows directly** (the jar is portable; install
+     a Windows JDK 21+).
+- **Devices don't appear on a normal network** (guest Wi-Fi / AP isolation /
+  corporate networks often filter multicast) — use **"Add device by IP"** at
+  the bottom of the Nearby tab: enter the other machine's address (shown by
+  `ip addr` / `ipconfig`), and both devices register each other in one step.
 
 ## Architecture
 

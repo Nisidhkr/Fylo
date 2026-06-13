@@ -72,6 +72,15 @@ public final class FileSender implements Closeable {
     private volatile boolean closed;
 
     public FileSender(Path file, String expectedToken, TransferConfig config, int port) throws IOException {
+        this(file, file.getFileName().toString(), expectedToken, config, port);
+    }
+
+    /**
+     * @param displayName the filename advertised in the manifest — may differ
+     *                    from the on-disk name (uploads are stored uuid-prefixed).
+     */
+    public FileSender(Path file, String displayName, String expectedToken, TransferConfig config,
+                      int port) throws IOException {
         if (!Files.isRegularFile(file)) {
             throw new IOException("Not a regular file: " + file);
         }
@@ -85,7 +94,7 @@ public final class FileSender implements Closeable {
 
         // Hashing 40 GB takes a while; do it in the background so offering a
         // file returns immediately. The first MANIFEST waits on the result.
-        String filename = file.getFileName().toString();
+        String filename = displayName;
         byte[] metadata = ("{\"name\":\"" + filename.replace("\"", "") + "\"}")
                 .getBytes(StandardCharsets.UTF_8);
         this.manifestFuture = CompletableFuture

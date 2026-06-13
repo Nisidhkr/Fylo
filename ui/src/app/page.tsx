@@ -5,6 +5,9 @@ import axios from 'axios';
 import FileUpload from '@/components/FileUpload';
 import FileDownload from '@/components/FileDownload';
 import InviteCode from '@/components/InviteCode';
+import NearbyDevices from '@/components/NearbyDevices';
+import IncomingOffers from '@/components/IncomingOffers';
+import TransfersPanel from '@/components/TransfersPanel';
 
 export interface Share {
   port: number;
@@ -29,7 +32,7 @@ export default function Home() {
   const [uploadPercent, setUploadPercent] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
   const [share, setShare] = useState<Share | null>(null);
-  const [activeTab, setActiveTab] = useState<'send' | 'receive'>('send');
+  const [activeTab, setActiveTab] = useState<'send' | 'receive' | 'nearby' | 'transfers'>('send');
 
   const handleFileUpload = async (file: File) => {
     setUploadedFile(file);
@@ -94,7 +97,7 @@ export default function Home() {
     }
   };
 
-  const tabClass = (tab: 'send' | 'receive') =>
+  const tabClass = (tab: 'send' | 'receive' | 'nearby' | 'transfers') =>
     `flex-1 py-2.5 text-sm transition-colors ${
       activeTab === tab
         ? 'border-b-2 border-neutral-900 text-neutral-900 font-medium'
@@ -115,9 +118,15 @@ export default function Home() {
         <button className={tabClass('receive')} onClick={() => setActiveTab('receive')}>
           Receive
         </button>
+        <button className={tabClass('nearby')} onClick={() => setActiveTab('nearby')}>
+          Nearby
+        </button>
+        <button className={tabClass('transfers')} onClick={() => setActiveTab('transfers')}>
+          Transfers
+        </button>
       </div>
 
-      {activeTab === 'send' ? (
+      {activeTab === 'send' && (
         <div className="space-y-4">
           <FileUpload onFileUpload={handleFileUpload} isUploading={isUploading} />
 
@@ -142,9 +151,14 @@ export default function Home() {
 
           <InviteCode share={share} />
         </div>
-      ) : (
+      )}
+      {activeTab === 'receive' && (
         <FileDownload onDownload={handleDownload} isDownloading={isDownloading} />
       )}
+      {activeTab === 'nearby' && <NearbyDevices />}
+      {activeTab === 'transfers' && <TransfersPanel />}
+
+      <IncomingOffers />
 
       <footer className="mt-16 text-center text-xs text-neutral-300">
         PeerLink © {new Date().getFullYear()}

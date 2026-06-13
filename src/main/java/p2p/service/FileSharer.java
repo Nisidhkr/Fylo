@@ -21,7 +21,13 @@ public class FileSharer implements Closeable {
     public record Offer(int port, String token) {
     }
 
-    private record Share(FileSender sender, String token) {
+    /** Everything the LAN mode needs to point a peer at this share. */
+    public record ShareInfo(int port, String token, Path path, String fileName, long size,
+                            String relativePath) {
+    }
+
+    private record Share(FileSender sender, String token, Path path, String relativePath,
+                         String fileName) {
     }
 
     private static final int BIND_ATTEMPTS = 20;
@@ -39,7 +45,16 @@ public class FileSharer implements Closeable {
 
     /** Starts sharing {@code file}; returns the port to connect to and the access token. */
     public Offer offer(Path file) throws IOException {
+        return offer(file, null);
+    }
+
+    /**
+     * Starts sharing {@code file}; {@code relativePath} (e.g. {@code photos/2024/a.jpg})
+     * is carried into LAN offers so folder uploads keep their structure on the receiver.
+     */
+    public Offer offer(Path file, String relativePath) throws IOException {
         String token = TransferTokens.generate();
+        String displayName = stripUploadPrefix(file.getFileName().toString());
         BindException lastBindFailure = null;
         for (int attempt = 0; attempt < BIND_ATTEMPTS; attempt++) {
             int port = UploadUtils.generateCode();
@@ -47,8 +62,9 @@ public class FileSharer implements Closeable {
                 continue;
             }
             try {
-                FileSender sender = new FileSender(file, token, config, port);
-                if (shares.putIfAbsent(port, new Share(sender, token)) != null) {
+                FileSender sender = new FileSender(file, displayName, token, config, port);
+                if (shares.putIfAbsent(port,
+                        new Share(sender, token, file, relativePath, displayName)) != null) {
                     sender.close();
                     continue;
                 }
@@ -60,6 +76,29 @@ public class FileSharer implements Closeable {
         }
         throw new IOException("Could not bind a sharing port after " + BIND_ATTEMPTS + " attempts",
                 lastBindFailure);
+    }
+
+    /** Uploads are stored as {@code <uuid>_<original name>}; advertise the original. */
+    private static String stripUploadPrefix(String storedName) {
+        int underscore = storedName.indexOf('_');
+        return underscore == 36 ? storedName.substring(underscore + 1) : storedName;
+    }
+
+    /** Metadata of an active share, for handing to a LAN peer. */
+    public java.util.Optional<ShareInfo> shareInfo(int port) {
+        Share share = shares.get(port);
+        if (share == null) {
+            return java.util.Optional.empty();
+        }
+        long size;
+        try {
+            size = java.nio.file.Files.size(share.path());
+        } catch (IOException e) {
+            return java.util.Optional.empty();
+        }
+        return java.util.Optional.of(new ShareInfo(port, share.token(), share.path(),
+                share.fileName(), size,
+                share.relativePath() != null ? share.relativePath() : share.fileName()));
     }
 
     public void stopSharing(int port) {

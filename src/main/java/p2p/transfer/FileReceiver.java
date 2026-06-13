@@ -53,11 +53,54 @@ public final class FileReceiver {
     private final Path targetDirectory;
     private final TransferConfig config;
 
+    private final java.util.Set<PeerClient> activeClients =
+            java.util.concurrent.ConcurrentHashMap.newKeySet();
+    private volatile boolean aborted;
+
     public FileReceiver(String host, int port, String token, Path targetDirectory, TransferConfig config) {
         this.address = new InetSocketAddress(host, port);
         this.token = token;
         this.targetDirectory = targetDirectory;
         this.config = config;
+    }
+
+    /**
+     * Aborts an in-flight {@link #download} from another thread by closing all
+     * open connections; blocked reads fail immediately and no retries are
+     * attempted. Resume metadata stays on disk, so a later download() resumes
+     * from the exact byte offset — this is how pause is implemented.
+     */
+    public void abort() {
+        aborted = true;
+        for (PeerClient client : activeClients) {
+            try {
+                client.close();
+            } catch (IOException ignored) {
+            }
+        }
+    }
+
+    /** Opens a connection that {@link #abort()} can reach. */
+    private PeerClient openClient() throws IOException {
+        if (aborted) {
+            throw new IOException("Transfer aborted");
+        }
+        PeerClient client = PeerClient.connect(address, token, config);
+        activeClients.add(client);
+        if (aborted) { // abort() may have raced past the add
+            activeClients.remove(client);
+            client.close();
+            throw new IOException("Transfer aborted");
+        }
+        return client;
+    }
+
+    private void closeClient(PeerClient client) {
+        activeClients.remove(client);
+        try {
+            client.close();
+        } catch (IOException ignored) {
+        }
     }
 
     /**
@@ -68,8 +111,11 @@ public final class FileReceiver {
      */
     public Path download(Consumer<ProgressTracker.Snapshot> progressListener) throws IOException {
         TransferManifest manifest;
-        try (PeerClient probe = PeerClient.connect(address, token, config)) {
+        PeerClient probe = openClient();
+        try {
             manifest = probe.manifest();
+        } finally {
+            closeClient(probe);
         }
 
         String safeName = sanitizeFilename(manifest.filename());
@@ -187,6 +233,9 @@ public final class FileReceiver {
     }
 
     private int backoffOrFail(int attempt, IOException cause) {
+        if (aborted) {
+            throw new CompletionException(new IOException("Transfer aborted", cause));
+        }
         attempt++;
         if (attempt > config.maxRetries()) {
             throw new CompletionException(new IOException(
@@ -205,7 +254,8 @@ public final class FileReceiver {
     private void downloadSegment(TransferManifest manifest, ResumeState state,
                                  ResumeState.Segment segment, FileChannel partChannel,
                                  Path resumeFile, ProgressTracker progress) throws IOException {
-        try (PeerClient client = PeerClient.connect(address, token, config)) {
+        PeerClient client = openClient();
+        try {
             if (!client.manifest().transferId().equals(manifest.transferId())) {
                 throw new TransferException(p2p.protocol.PeerLinkProtocol.ERR_NOT_FOUND,
                         "Offered file changed during transfer");
@@ -238,6 +288,8 @@ public final class FileReceiver {
             }
             client.readComplete();
             state.save(resumeFile);
+        } finally {
+            closeClient(client);
         }
     }
 
@@ -259,7 +311,8 @@ public final class FileReceiver {
             throw new IOException("SHA-256 verification failed and corruption could not be localized");
         }
         System.err.println("Verification failed; re-fetching " + badChunks.size() + " corrupted chunk(s)");
-        try (PeerClient client = PeerClient.connect(address, token, config)) {
+        PeerClient client = openClient();
+        try {
             ByteBuffer buffer = ByteBuffer.allocateDirect(RECEIVE_BUFFER_BYTES);
             for (long chunk : badChunks) {
                 long start = chunk * (long) manifest.chunkSize();
@@ -282,6 +335,8 @@ public final class FileReceiver {
                 }
                 client.readComplete();
             }
+        } finally {
+            closeClient(client);
         }
         partChannel.force(true);
 
@@ -321,7 +376,8 @@ public final class FileReceiver {
     private List<Long> findCorruptChunks(TransferManifest manifest, int[] localCrcs) throws IOException {
         List<Long> bad = new ArrayList<>();
         int batchLimit = 100_000;
-        try (PeerClient client = PeerClient.connect(address, token, config)) {
+        PeerClient client = openClient();
+        try {
             long chunkCount = manifest.chunkCount();
             for (long first = 0; first < chunkCount; first += batchLimit) {
                 int count = (int) Math.min(batchLimit, chunkCount - first);
@@ -332,6 +388,8 @@ public final class FileReceiver {
                     }
                 }
             }
+        } finally {
+            closeClient(client);
         }
         return bad;
     }

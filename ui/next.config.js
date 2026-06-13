@@ -17,6 +17,18 @@ const nextConfig = {
         source: '/api/download/:port',
         destination: `${backendUrl}/download/:port`,
       },
+      {
+        source: '/api/lan/:path*',
+        destination: `${backendUrl}/lan/:path*`,
+      },
+      {
+        source: '/api/transfers',
+        destination: `${backendUrl}/transfers`,
+      },
+      {
+        source: '/api/transfers/:path*',
+        destination: `${backendUrl}/transfers/:path*`,
+      },
     ];
   },
 }
