@@ -48,6 +48,21 @@ public final class PlanService {
                 : Entitlements.FREE;
     }
 
+    /**
+     * Storage-quota gate (backbone §5.2): {@code usedBytes} comes off the
+     * user row ({@code users.storage_used}, mirrored by
+     * {@code User.storageUsedBytes}); the limit is the plan's
+     * {@code maxStorageBytes} (mirrored by {@code users.storage_limit}).
+     */
+    public void checkStorageLimit(String userId, long usedBytes, long additionalBytes)
+            throws PlanLimitException {
+        Entitlements plan = entitlementsFor(userId);
+        if (usedBytes + additionalBytes > plan.maxStorageBytes()) {
+            throw new PlanLimitException("max_storage", "Storage quota exceeded ("
+                    + (plan.maxStorageBytes() >> 30) + " GB on the " + plan.tierName() + " plan)");
+        }
+    }
+
     public Optional<Subscription> subscription(String userId) {
         return Optional.ofNullable(byUserId.get(userId)).filter(Subscription::active);
     }

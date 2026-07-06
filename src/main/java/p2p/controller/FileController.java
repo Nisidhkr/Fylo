@@ -181,16 +181,17 @@ public class FileController {
         UserRepository userRepository = PgUserRepository.fromEnv()
                 .<UserRepository>map(pg -> pg)
                 .orElseGet(() -> new JsonUserRepository(dataDir));
-        AuthService authService = new AuthService(userRepository, jwtService, sessionService);
+        PlanService planService = new PlanService(dataDir);
+        AuthService authService = new AuthService(userRepository, jwtService, sessionService,
+                planService);
         PresenceService userPresence = new PresenceService();
         NotificationService notifications = new NotificationService();
         TransferHistoryService history = new TransferHistoryService();
         UserService userService = new UserService(userRepository, userPresence);
         UsernameShareService usernameShare = new UsernameShareService(
                 engine, userRepository, userPresence, notifications, history);
-        PlanService planService = new PlanService(dataDir);
         this.linkShare = new LinkShareService(engine, history, planService,
-                new FileSafetyService(), dataDir);
+                new FileSafetyService(), userRepository, dataDir);
         TrustedDeviceService trustedDevices = new TrustedDeviceService(deviceRegistry);
         QrPairingService pairingService = new QrPairingService(identity, deviceRegistry, boundPort);
 

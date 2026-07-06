@@ -299,6 +299,117 @@ paths:
               schema: { $ref: '#/components/schemas/ResolvedShare' }
         '404': { $ref: '#/components/responses/NotFound' }
 
+  # ── Mode 1 rendezvous (backbone §10 route names, guest) ──────────────
+  /api/v1/transfers/direct/initiate:
+    post:
+      tags: [Transfers]
+      summary: 'Mode 1: sender creates a direct-share session (guest)'
+      operationId: directShareInitiate
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [fileName, fileSizeBytes]
+              properties:
+                fileName: { type: string }
+                fileSizeBytes: { type: integer, format: int64 }
+                checksum: { type: string, description: SHA-256 hex, optional }
+      responses:
+        '200':
+          description: Session created (expires in 10 minutes)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId: { type: string, format: uuid }
+                  sessionCode: { type: string, example: ABC123 }
+                  transferToken: { type: string }
+                  expiresAt: { type: integer, format: int64 }
+        '400': { $ref: '#/components/responses/BadRequest' }
+  /api/v1/transfers/direct/join:
+    post:
+      tags: [Transfers]
+      summary: 'Mode 1: receiver joins via the 6-char share code (guest)'
+      operationId: directShareJoin
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code: { type: string, example: ABC123 }
+      responses:
+        '200':
+          description: Joined session
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessionId: { type: string, format: uuid }
+                  transferToken: { type: string }
+                  fileName: { type: string }
+                  fileSizeBytes: { type: integer, format: int64 }
+                  senderReady: { type: boolean }
+        '404': { $ref: '#/components/responses/NotFound' }
+
+  # ── Mode 3 backbone route names (aliases of /api/v1/requests) ────────
+  /api/v1/transfers/username/request:
+    post:
+      tags: [Transfer Requests]
+      summary: 'Mode 3: send a file request to @username (backbone route name)'
+      operationId: usernameShareRequest
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [toUsername, port]
+              properties:
+                toUsername: { type: string, example: aman }
+                port: { type: integer, description: Sender's live share port }
+      responses:
+        '201':
+          description: Request created (PENDING)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requestId: { type: string, format: uuid }
+                  state: { type: string }
+        '401': { $ref: '#/components/responses/Unauthorized' }
+  /api/v1/transfers/username/respond:
+    post:
+      tags: [Transfer Requests]
+      summary: 'Mode 3: accept or reject a request (backbone route name)'
+      operationId: usernameShareRespond
+      security: [{ bearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [requestId, action]
+              properties:
+                requestId: { type: string, format: uuid }
+                action: { type: string, enum: [accept, reject] }
+      responses:
+        '200':
+          description: On accept, the connection details
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AcceptedRequest' }
+        '404': { $ref: '#/components/responses/NotFound' }
+
   # ── Transfers (queue) ─────────────────────────────────────────────────
   /transfers:
     get:
@@ -344,9 +455,14 @@ paths:
       operationId: linkUpload
       security: [{ bearerAuth: [] }]
       parameters:
-        - name: ttlDays
+        - name: expiryDays
           in: query
           description: Expiry in days. 0 = never (Premium). Omit for plan default (Free = 2 days).
+          schema: { type: integer }
+        - name: ttlDays
+          in: query
+          deprecated: true
+          description: Deprecated alias of expiryDays.
           schema: { type: integer }
         - name: password
           in: query
@@ -637,7 +753,7 @@ components:
             limit:
               type: string
               description: Machine-readable limit name
-              enum: [max_file_size, max_storage, max_active_links, link_expiry,
+              enum: [max_file_size, max_storage, active_links, link_expiry,
                      password_links, download_limits, link_analytics,
                      link_revocation, file_blocked]
 

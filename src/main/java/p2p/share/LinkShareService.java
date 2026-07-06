@@ -10,6 +10,8 @@ import p2p.plan.PlanLimitException;
 import p2p.plan.PlanService;
 import p2p.security.FileSafetyService;
 import p2p.user.TransferHistoryService;
+import p2p.user.User;
+import p2p.user.UserRepository;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -51,17 +53,20 @@ public final class LinkShareService implements AutoCloseable {
     private final TransferHistoryService history;
     private final PlanService plans;
     private final FileSafetyService fileSafety;
+    private final UserRepository users;
     private final ObjectMapper json = new ObjectMapper();
     private final Path persistFile;
     private final ConcurrentHashMap<String, ShareLink> linksBySlug = new ConcurrentHashMap<>();
     private final Thread sweeper;
 
     public LinkShareService(TransferEngine engine, TransferHistoryService history,
-                            PlanService plans, FileSafetyService fileSafety, Path dataDir) {
+                            PlanService plans, FileSafetyService fileSafety,
+                            UserRepository users, Path dataDir) {
         this.engine = engine;
         this.history = history;
         this.plans = plans;
         this.fileSafety = fileSafety;
+        this.users = users;
         this.persistFile = dataDir.resolve("links.json");
         load();
         // Virtual thread: sweeping expired links costs nothing while idle.
@@ -87,6 +92,8 @@ public final class LinkShareService implements AutoCloseable {
                 options.maxDownloads(), false);
         linksBySlug.put(link.slug(), link);
         persist();
+        // Storage accounting on the user row (users.storage_used).
+        users.incrementStorageUsed(owner.userId(), object.size());
         history.record(owner.userId(), "SEND", TransferHistoryService.Mode.LINK,
                 link.fileName(), link.sizeBytes(), "link:" + link.slug(), "CREATED");
         return link;
@@ -103,16 +110,16 @@ public final class LinkShareService implements AutoCloseable {
                     + (plan.maxFileBytes() >> 30) + " GB per-file limit of the "
                     + plan.tierName() + " plan");
         }
-        List<ShareLink> mine = activeLinksFor(owner.userId());
-        if (mine.size() >= plan.maxActiveLinks()) {
-            throw new PlanLimitException("max_active_links", "Active link limit reached ("
+        // Unlimited (Integer.MAX_VALUE) skips the count entirely.
+        if (plan.maxActiveLinks() != Integer.MAX_VALUE
+                && activeLinksFor(owner.userId()).size() >= plan.maxActiveLinks()) {
+            throw new PlanLimitException("active_links", "Active link limit reached ("
                     + plan.maxActiveLinks() + " on the " + plan.tierName() + " plan)");
         }
-        long used = mine.stream().mapToLong(ShareLink::sizeBytes).sum();
-        if (used + size > plan.maxStorageBytes()) {
-            throw new PlanLimitException("max_storage", "Storage quota exceeded ("
-                    + (plan.maxStorageBytes() >> 30) + " GB on the " + plan.tierName() + " plan)");
-        }
+        // Quota is read off the user row (users.storage_used), not recomputed.
+        long used = users.findById(owner.userId())
+                .map(User::storageUsedBytes).orElse(0L);
+        plans.checkStorageLimit(owner.userId(), used, size);
         if (options.password() != null && !options.password().isBlank()
                 && !plan.passwordProtectedLinks()) {
             throw new PlanLimitException("password_links",
@@ -207,6 +214,7 @@ public final class LinkShareService implements AutoCloseable {
         }
         linksBySlug.remove(slug);
         engine.storage().delete(link.objectId());
+        users.incrementStorageUsed(link.ownerUserId(), -link.sizeBytes());
         persist();
         return true;
     }
@@ -231,6 +239,7 @@ public final class LinkShareService implements AutoCloseable {
                 linksBySlug.remove(link.slug());
                 try {
                     engine.storage().delete(link.objectId());
+                    users.incrementStorageUsed(link.ownerUserId(), -link.sizeBytes());
                 } catch (IOException e) {
                     System.err.println("Could not delete expired object "
                             + link.objectId() + ": " + e.getMessage());

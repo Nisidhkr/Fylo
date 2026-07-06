@@ -5,15 +5,21 @@ import p2p.util.Hashing;
 import software.amazon.awssdk.core.ResponseInputStream;
 import software.amazon.awssdk.core.sync.RequestBody;
 import software.amazon.awssdk.services.s3.S3Client;
+import software.amazon.awssdk.services.s3.model.CompletedMultipartUpload;
+import software.amazon.awssdk.services.s3.model.CompletedPart;
+import software.amazon.awssdk.services.s3.model.CreateMultipartUploadResponse;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
 import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException;
 import software.amazon.awssdk.services.s3.model.S3Exception;
+import software.amazon.awssdk.services.s3.model.UploadPartResponse;
 
+import java.io.BufferedInputStream;
 import java.io.BufferedOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.nio.channels.FileChannel;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -40,6 +46,9 @@ import java.util.UUID;
 public class S3CompatibleStorageProvider implements StorageProvider {
 
     private static final int COPY_BUFFER_BYTES = 256 * 1024;
+    /** Objects at or above this size use multipart upload (backbone §9). */
+    static final long MULTIPART_THRESHOLD = 64L * 1024 * 1024;  // 64 MB
+    static final long PART_SIZE = 16L * 1024 * 1024;            // 16 MB parts
 
     private final S3Client s3;
     private final String bucket;
@@ -71,21 +80,77 @@ public class S3CompatibleStorageProvider implements StorageProvider {
             String sha256 = Hashing.toHex(Hashing.sha256Unchecked(spool));
             String safeName = FileReceiver.sanitizeFilename(fileName);
             long createdAt = System.currentTimeMillis();
+            Map<String, String> metadata = Map.of(
+                    "fylo-name", safeName,
+                    "fylo-sha256", sha256,
+                    "fylo-created", Long.toString(createdAt));
             long contentLength = size;
             try {
-                s3.putObject(b -> b.bucket(bucket).key(objectId)
-                                .contentLength(contentLength)
-                                .metadata(Map.of(
-                                        "fylo-name", safeName,
-                                        "fylo-sha256", sha256,
-                                        "fylo-created", Long.toString(createdAt))),
-                        RequestBody.fromFile(spool));
+                if (usesMultipart(size)) {
+                    // S3/MinIO cap a single PUT at 5 GiB; multipart is what
+                    // makes the premium 100 GB+ file promise real.
+                    multipartUpload(spool, objectId, metadata, size);
+                } else {
+                    s3.putObject(b -> b.bucket(bucket).key(objectId)
+                                    .contentLength(contentLength)
+                                    .metadata(metadata),
+                            RequestBody.fromFile(spool));
+                }
             } catch (S3Exception e) {
                 throw new IOException("Object store rejected upload: " + e.getMessage(), e);
             }
             return new StoredObject(objectId, safeName, size, sha256, createdAt);
         } finally {
             Files.deleteIfExists(spool);
+        }
+    }
+
+    /** Threshold routing, exposed for tests: small objects go single-PUT. */
+    static boolean usesMultipart(long sizeBytes) {
+        return sizeBytes >= MULTIPART_THRESHOLD;
+    }
+
+    /**
+     * Multipart upload from the spool file: fixed 16 MB parts read through
+     * one reusable buffer (constant memory regardless of object size), parts
+     * uploaded sequentially on the calling virtual thread, and the upload
+     * aborted server-side on any failure so no orphaned parts accrue.
+     */
+    private void multipartUpload(Path spool, String objectId, Map<String, String> metadata,
+                                 long size) throws IOException {
+        CreateMultipartUploadResponse created = s3.createMultipartUpload(
+                b -> b.bucket(bucket).key(objectId).metadata(metadata));
+        String uploadId = created.uploadId();
+        try (InputStream in = new BufferedInputStream(Files.newInputStream(spool), COPY_BUFFER_BYTES)) {
+            List<CompletedPart> parts = new ArrayList<>();
+            byte[] buffer = new byte[(int) PART_SIZE];
+            long remaining = size;
+            int partNumber = 1;
+            while (remaining > 0) {
+                int read = in.readNBytes(buffer, 0, (int) Math.min(PART_SIZE, remaining));
+                if (read <= 0) {
+                    throw new IOException("Spool truncated during multipart upload");
+                }
+                final int pn = partNumber;
+                final long partLength = read;
+                UploadPartResponse part = s3.uploadPart(
+                        b -> b.bucket(bucket).key(objectId).uploadId(uploadId)
+                                .partNumber(pn).contentLength(partLength),
+                        RequestBody.fromByteBuffer(ByteBuffer.wrap(buffer, 0, read)));
+                parts.add(CompletedPart.builder().partNumber(pn).eTag(part.eTag()).build());
+                remaining -= read;
+                partNumber++;
+            }
+            s3.completeMultipartUpload(b -> b.bucket(bucket).key(objectId).uploadId(uploadId)
+                    .multipartUpload(CompletedMultipartUpload.builder().parts(parts).build()));
+        } catch (IOException | RuntimeException e) {
+            try {
+                s3.abortMultipartUpload(b -> b.bucket(bucket).key(objectId).uploadId(uploadId));
+            } catch (S3Exception ignored) {
+                // Best effort; lifecycle rules clean up aborted uploads.
+            }
+            throw e instanceof IOException io
+                    ? io : new IOException("Multipart upload failed: " + e.getMessage(), e);
         }
     }
 

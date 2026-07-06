@@ -12,7 +12,9 @@ import p2p.share.LinkShareService;
 import p2p.share.ShareLink;
 import p2p.storage.LocalStorageProvider;
 import p2p.transfer.TransferManager;
+import p2p.user.JsonUserRepository;
 import p2p.user.TransferHistoryService;
+import p2p.user.User;
 
 import java.io.ByteArrayInputStream;
 import java.io.IOException;
@@ -37,6 +39,7 @@ class PlanEnforcementTest {
     private TransferEngine engine;
     private PlanService plans;
     private LinkShareService links;
+    private JsonUserRepository users;
     private final AuthContext user = new AuthContext("user-1", "nisidh");
 
     @BeforeEach
@@ -44,8 +47,11 @@ class PlanEnforcementTest {
         engine = new TransferEngine(new FileSharer(), new TransferManager(1),
                 new LocalStorageProvider(dataDir));
         plans = new PlanService(dataDir);
+        users = new JsonUserRepository(dataDir);
+        users.save(new User(user.userId(), user.username(), user.username(), null,
+                "x", "FREE", 0, System.currentTimeMillis()));
         links = new LinkShareService(engine, new TransferHistoryService(), plans,
-                new FileSafetyService(true), dataDir);
+                new FileSafetyService(true), users, dataDir);
     }
 
     @AfterEach
@@ -124,5 +130,36 @@ class PlanEnforcementTest {
     void expiredSubscriptionFallsBackToFree() {
         plans.grantPremium(user.userId(), 500L << 30, System.currentTimeMillis() - 1000);
         assertEquals("FREE", plans.entitlementsFor(user.userId()).tierName());
+    }
+
+    @Test
+    void freeUserCannotExceed10ActiveLinks() throws IOException {
+        for (int i = 0; i < 10; i++) {
+            create(LinkShareService.LinkOptions.DEFAULTS);
+        }
+        PlanLimitException capped = assertThrows(PlanLimitException.class,
+                () -> create(LinkShareService.LinkOptions.DEFAULTS));
+        assertEquals("active_links", capped.limit());
+    }
+
+    @Test
+    void premiumUserHasUnlimitedActiveLinks() throws IOException {
+        plans.grantPremium(user.userId(), 500L << 30, 0);
+        assertEquals(Integer.MAX_VALUE,
+                plans.entitlementsFor(user.userId()).maxActiveLinks());
+        // Sail past the FREE cap without tripping any limit.
+        for (int i = 0; i < 12; i++) {
+            create(LinkShareService.LinkOptions.DEFAULTS);
+        }
+        assertEquals(12, links.activeLinkCount(user.userId()));
+    }
+
+    @Test
+    void storageAccountingTracksCreateAndDelete() throws IOException {
+        var link = create(LinkShareService.LinkOptions.DEFAULTS);
+        assertEquals(link.sizeBytes(),
+                users.findById(user.userId()).orElseThrow().storageUsedBytes());
+        links.delete(user, link.slug());
+        assertEquals(0, users.findById(user.userId()).orElseThrow().storageUsedBytes());
     }
 }

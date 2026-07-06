@@ -256,6 +256,14 @@ public final class ApiRouter {
             // Mode 1 — Direct Share code lookup (guest)
             case "GET /direct/{code}" -> handleDirectLookup(exchange, lastSegment(path));
 
+            // Mode 1 — backbone §10 rendezvous endpoints (guest)
+            case "POST /transfers/direct/initiate" -> handleDirectInitiate(exchange);
+            case "POST /transfers/direct/join" -> handleDirectJoin(exchange);
+
+            // Mode 3 — backbone §10 route names (aliases of /requests)
+            case "POST /transfers/username/request" -> handleCreateRequest(exchange);
+            case "POST /transfers/username/respond" -> handleUsernameRespond(exchange);
+
             // Devices: trust + pairing
             case "GET /devices/trusted" -> sendJson(exchange, 200, trustedDevices.trustedDevices());
             case "POST /devices/{id}/trust" -> handleTrust(exchange, path);
@@ -278,7 +286,7 @@ public final class ApiRouter {
         JsonNode body = readBody(exchange);
         try {
             User user = auth.register(text(body, "username"), text(body, "displayName"),
-                    chars(body, "password"));
+                    text(body, "email"), chars(body, "password"));
             AuthService.TokenPair pair = auth.login(user.username(), chars(body, "password"));
             sendJson(exchange, 201, Map.of(
                     "user", user.profile(true), "tokens", pair));
@@ -321,6 +329,54 @@ public final class ApiRouter {
                 "state", request.state().name()));
     }
 
+    /** Backbone alias: body {requestId, action} instead of /requests/{id}. */
+    private void handleUsernameRespond(HttpExchange exchange) throws IOException {
+        AuthContext ctx = require(exchange);
+        JsonNode body = readBody(exchange);
+        String requestId = text(body, "requestId");
+        if (requestId == null) {
+            throw new ApiError(400, "requestId is required");
+        }
+        switch (text(body, "action")) {
+            case "accept" -> sendJson(exchange, 200, usernameShare.accept(ctx, requestId));
+            case "reject" -> {
+                usernameShare.reject(ctx, requestId);
+                sendJson(exchange, 200, Map.of("ok", true));
+            }
+            default -> throw new ApiError(400, "action must be accept or reject");
+        }
+    }
+
+    /** Mode 1 rendezvous: sender announces file metadata, gets code + token. */
+    private void handleDirectInitiate(HttpExchange exchange) throws IOException {
+        JsonNode body = readBody(exchange);
+        String fileName = text(body, "fileName");
+        long fileSize = body.path("fileSizeBytes").asLong(0);
+        if (fileName == null || fileName.isBlank() || fileSize < 0) {
+            throw new ApiError(400, "fileName and fileSizeBytes are required");
+        }
+        DirectShareService.DirectSession session =
+                directShare.initiate(fileName, fileSize, text(body, "checksum"));
+        sendJson(exchange, 200, Map.of(
+                "sessionId", session.sessionId(),
+                "sessionCode", session.sessionCode(),
+                "transferToken", session.transferToken(),
+                "expiresAt", session.expiresAtEpochMs()));
+    }
+
+    /** Mode 1 rendezvous: receiver joins with the 6-char code. */
+    private void handleDirectJoin(HttpExchange exchange) throws IOException {
+        JsonNode body = readBody(exchange);
+        DirectShareService.DirectSession session = directShare.join(text(body, "code"))
+                .orElseThrow(() -> new ApiError(404, "Code not found or expired"));
+        sendJson(exchange, 200, Map.of(
+                "sessionId", session.sessionId(),
+                "transferToken", session.transferToken(),
+                "fileName", session.fileName(),
+                "fileSizeBytes", session.fileSizeBytes(),
+                "senderReady", true));
+    }
+
     private void handleRequestAction(HttpExchange exchange, String requestId) throws IOException {
         AuthContext ctx = require(exchange);
         JsonNode body = readBody(exchange);
@@ -352,12 +408,15 @@ public final class ApiRouter {
             throw new ApiError(400, "No file field in request");
         }
         try {
-            // Options: ?ttlDays=N (0 = never expire, premium), ?password=…,
-            // ?maxDownloads=N — all validated against the plan by the service.
-            long ttlDays = optionalLong(queryParam(exchange, "ttlDays"));
-            Duration ttl = queryParam(exchange, "ttlDays") == null
+            // Options: ?expiryDays=N (backbone name; ttlDays kept as alias;
+            // 0 = never expire, premium), ?password=…, ?maxDownloads=N —
+            // all validated against the plan by the service.
+            String expiryRaw = firstPresent(
+                    queryParam(exchange, "expiryDays"), queryParam(exchange, "ttlDays"));
+            long expiryDays = optionalLong(expiryRaw);
+            Duration ttl = expiryRaw == null
                     ? null
-                    : (ttlDays <= 0 ? Duration.ZERO : Duration.ofDays(ttlDays));
+                    : (expiryDays <= 0 ? Duration.ZERO : Duration.ofDays(expiryDays));
             LinkShareService.LinkOptions options = new LinkShareService.LinkOptions(
                     ttl, queryParam(exchange, "password"),
                     optionalLong(queryParam(exchange, "maxDownloads")));
@@ -546,6 +605,16 @@ public final class ApiRouter {
     private static char[] chars(JsonNode body, String field) {
         String value = text(body, field);
         return value == null ? new char[0] : value.toCharArray();
+    }
+
+    /** First non-null value — parameter aliasing (expiryDays | ttlDays). */
+    private static String firstPresent(String... values) {
+        for (String value : values) {
+            if (value != null) {
+                return value;
+            }
+        }
+        return null;
     }
 
     private static long optionalLong(String value) {

@@ -86,20 +86,39 @@ public final class PgUserRepository implements UserRepository {
     public void save(User u) {
         try (Connection conn = connect();
              PreparedStatement ps = conn.prepareStatement("""
-                     INSERT INTO users (id, username, display_name, password_hash, created_at)
-                     VALUES (?, ?, ?, ?, ?)
+                     INSERT INTO users (id, username, display_name, email, password_hash,
+                                        plan_tier, storage_used, created_at)
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                      ON CONFLICT (id) DO UPDATE SET
                          display_name = EXCLUDED.display_name,
-                         password_hash = EXCLUDED.password_hash
+                         email = EXCLUDED.email,
+                         password_hash = EXCLUDED.password_hash,
+                         plan_tier = EXCLUDED.plan_tier
                      """)) {
             ps.setObject(1, UUID.fromString(u.userId()));
             ps.setString(2, u.username());
             ps.setString(3, u.displayName());
-            ps.setString(4, u.passwordHash());
-            ps.setTimestamp(5, new Timestamp(u.createdAtEpochMs()));
+            ps.setString(4, u.email());
+            ps.setString(5, u.passwordHash());
+            ps.setString(6, u.planType() == null ? "FREE" : u.planType());
+            ps.setLong(7, u.storageUsedBytes());
+            ps.setTimestamp(8, new Timestamp(u.createdAtEpochMs()));
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new IllegalStateException("User save failed", e);
+        }
+    }
+
+    @Override
+    public void incrementStorageUsed(String userId, long deltaBytes) {
+        try (Connection conn = connect();
+             PreparedStatement ps = conn.prepareStatement(
+                     "UPDATE users SET storage_used = GREATEST(0, storage_used + ?) WHERE id = ?")) {
+            ps.setLong(1, deltaBytes);
+            ps.setObject(2, UUID.fromString(userId));
+            ps.executeUpdate();
+        } catch (SQLException e) {
+            throw new IllegalStateException("Storage accounting update failed", e);
         }
     }
 
@@ -123,7 +142,10 @@ public final class PgUserRepository implements UserRepository {
                 rs.getObject("id", UUID.class).toString(),
                 rs.getString("username"),
                 rs.getString("display_name"),
+                rs.getString("email"),
                 rs.getString("password_hash"),
+                rs.getString("plan_tier"),
+                rs.getLong("storage_used"),
                 rs.getTimestamp("created_at").getTime());
     }
 

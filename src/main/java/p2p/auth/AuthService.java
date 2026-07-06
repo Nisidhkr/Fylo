@@ -1,5 +1,6 @@
 package p2p.auth;
 
+import p2p.plan.PlanService;
 import p2p.user.User;
 import p2p.user.UserRepository;
 
@@ -33,14 +34,18 @@ public final class AuthService {
     private final UserRepository users;
     private final JwtService jwt;
     private final SessionService sessions;
+    private final PlanService plans;
 
-    public AuthService(UserRepository users, JwtService jwt, SessionService sessions) {
+    public AuthService(UserRepository users, JwtService jwt, SessionService sessions,
+                       PlanService plans) {
         this.users = users;
         this.jwt = jwt;
         this.sessions = sessions;
+        this.plans = plans;
     }
 
-    public User register(String username, String displayName, char[] password) throws AuthException {
+    public User register(String username, String displayName, String email, char[] password)
+            throws AuthException {
         String normalized = username == null ? "" : username.strip().toLowerCase(java.util.Locale.ROOT);
         if (normalized.startsWith("@")) {
             normalized = normalized.substring(1);
@@ -56,7 +61,9 @@ public final class AuthService {
         }
         User user = new User(UUID.randomUUID().toString(), normalized,
                 displayName == null || displayName.isBlank() ? normalized : displayName.strip(),
-                PasswordHasher.hash(password), System.currentTimeMillis());
+                email == null || email.isBlank() ? null : email.strip(),
+                PasswordHasher.hash(password),
+                "FREE", 0, System.currentTimeMillis());
         users.save(user);
         return user;
     }
@@ -94,8 +101,13 @@ public final class AuthService {
     }
 
     private TokenPair issuePair(User user) {
-        String access = jwt.issue(user.userId(), user.username(), JwtService.TokenType.ACCESS, ACCESS_TTL);
-        String refresh = jwt.issue(user.userId(), user.username(), JwtService.TokenType.REFRESH, REFRESH_TTL);
+        // Plan claim (backbone §8.3): PlanService is the live authority; the
+        // user row's planType is the persisted mirror.
+        String plan = plans.entitlementsFor(user.userId()).tierName();
+        String access = jwt.issue(user.userId(), user.username(), plan,
+                JwtService.TokenType.ACCESS, ACCESS_TTL);
+        String refresh = jwt.issue(user.userId(), user.username(), plan,
+                JwtService.TokenType.REFRESH, REFRESH_TTL);
         // Register the refresh jti so it can be consumed exactly once.
         jwt.verify(refresh, JwtService.TokenType.REFRESH).ifPresent(claims ->
                 sessions.register(claims.tokenId(), user.userId(), claims.expiresAtEpochSec()));

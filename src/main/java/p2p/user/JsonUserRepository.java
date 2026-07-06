@@ -62,6 +62,15 @@ public final class JsonUserRepository implements UserRepository {
         persist();
     }
 
+    @Override
+    public void incrementStorageUsed(String userId, long deltaBytes) {
+        User updated = byId.computeIfPresent(userId,
+                (id, u) -> u.withStorageUsedBytes(u.storageUsedBytes() + deltaBytes));
+        if (updated != null) {
+            persist();
+        }
+    }
+
     private static String normalize(String username) {
         String value = username.strip().toLowerCase(Locale.ROOT);
         return value.startsWith("@") ? value.substring(1) : value;

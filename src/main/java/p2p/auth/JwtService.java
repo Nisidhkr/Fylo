@@ -32,8 +32,8 @@ public final class JwtService {
     public enum TokenType { ACCESS, REFRESH, DEVICE }
 
     /** Verified token contents. */
-    public record Claims(String subject, String username, TokenType type, String tokenId,
-                         long expiresAtEpochSec) {
+    public record Claims(String subject, String username, String plan, TokenType type,
+                         String tokenId, long expiresAtEpochSec) {
     }
 
     private static final Base64.Encoder B64 = Base64.getUrlEncoder().withoutPadding();
@@ -48,11 +48,13 @@ public final class JwtService {
         this.secret = loadOrCreateSecret(dataDir.resolve("jwt.secret"));
     }
 
-    public String issue(String userId, String username, TokenType type, Duration ttl) {
+    public String issue(String userId, String username, String plan, TokenType type,
+                        Duration ttl) {
         long now = System.currentTimeMillis() / 1000;
         Map<String, Object> payload = new HashMap<>();
         payload.put("sub", userId);
         payload.put("preferred_username", username);
+        payload.put("plan", plan == null ? "FREE" : plan); // backbone §8.3 payload
         payload.put("typ", type.name());
         payload.put("jti", UUID.randomUUID().toString());
         payload.put("iat", now);
@@ -96,7 +98,8 @@ public final class JwtService {
                 return Optional.empty();
             }
             return Optional.of(new Claims((String) payload.get("sub"),
-                    (String) payload.get("preferred_username"), type,
+                    (String) payload.get("preferred_username"),
+                    (String) payload.get("plan"), type,
                     (String) payload.get("jti"), exp));
         } catch (IOException | RuntimeException e) {
             return Optional.empty();

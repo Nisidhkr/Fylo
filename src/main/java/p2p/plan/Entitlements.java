@@ -57,7 +57,7 @@ public record Entitlements(
                 "PREMIUM",
                 200 * GB,                    // 100 GB+ per file
                 storageBytes,
-                1_000,
+                Integer.MAX_VALUE,           // unlimited active links (backbone §13.2)
                 Set.of(7, 30, 90),
                 true,                        // custom expiry
                 true,                        // never expire

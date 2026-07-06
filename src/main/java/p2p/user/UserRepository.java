@@ -20,4 +20,11 @@ public interface UserRepository {
 
     /** Inserts or updates by userId. */
     void save(User user);
+
+    /**
+     * Atomically adjusts the user's storage accounting ({@code users.storage_used}).
+     * Negative deltas free quota (link delete / expiry sweep). No-op for
+     * unknown users. Clamped at zero.
+     */
+    void incrementStorageUsed(String userId, long deltaBytes);
 }
