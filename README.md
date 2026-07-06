@@ -38,20 +38,39 @@ Plus the original internet mode:
 
 ## Project Structure
 
-- `src/main/java/p2p`: Java backend
-  - `App.java` — entry point
+- `src/main/java/p2p`: Java backend (the unified Fylo platform — see
+  [docs/UNIFIED-PLATFORM.md](docs/UNIFIED-PLATFORM.md))
+  - `App.java` — entry point (one server, one JVM)
   - `controller/FileController.java` — HTTP gateway (`/upload`, `/download`,
-    `/lan/*`, `/transfers`)
+    `/lan/*`, `/transfers`) and composition root
+  - `api/ApiRouter.java` — unified API (`/api/v1/**`: auth, users,
+    notifications, transfer requests, links, devices, pairing; `/s/{slug}`
+    public link downloads)
+  - `engine/` — the ONE transfer engine facade (`TransferEngine`,
+    `TransferSource`, `ShareCodes`)
   - `service/FileSharer.java` — registry of active shares
   - `protocol/` — binary wire protocol (frames, manifest, errors)
   - `transfer/` — `FileSender`, `FileReceiver`, `PeerClient`,
     `TransferManager` (queue/pause/resume), resume state, progress tracking,
     network tuning presets
-  - `device/` — identity, registry, mDNS discovery, presence/heartbeats
+  - `share/` — mode services: Direct (codes/QR), Username (request/accept),
+    Link (cloud links, 2-day default expiry); Nearby lives in `lan/`
+  - `auth/` — JWT (HS256), PBKDF2 password hashing, refresh-token rotation
+  - `user/` — accounts, @username search, presence, notifications, history
+  - `storage/` — `StorageProvider` seam + local implementation (S3/MinIO later)
+  - `device/` — identity, registry, mDNS discovery, presence/heartbeats,
+    QR pairing, trusted-device policy
   - `lan/` — offers, approval, device-to-device control plane
   - `security/` — transfer tokens
 - `ui/`: Next.js frontend (`src/app`, `src/components`)
-- `docs/`: [PROTOCOL.md](docs/PROTOCOL.md) (wire format),
+- `db/migrations/`: PostgreSQL schema (the ONE database; applied by compose
+  and CI)
+- `deploy/`: Prometheus/Grafana provisioning for the compose stack
+- `docs/`: [UNIFIED-PLATFORM.md](docs/UNIFIED-PLATFORM.md) (Part 1
+  architecture, diagrams, migration plan),
+  [UNIFIED-PLATFORM-PART2.md](docs/UNIFIED-PLATFORM-PART2.md) (storage, DB,
+  security, plans, scaling, observability), [openapi.yaml](docs/openapi.yaml)
+  (OpenAPI 3.1 / Swagger spec), [PROTOCOL.md](docs/PROTOCOL.md) (wire format),
   [ARCHITECTURE.md](docs/ARCHITECTURE.md) (design, performance, security)
 
 ## Prerequisites

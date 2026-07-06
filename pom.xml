@@ -60,6 +60,34 @@
       <version>2.0.13</version>
       <scope>runtime</scope>
     </dependency>
+    <!-- S3-compatible object storage (AWS S3 and MinIO share this client) -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>2.29.45</version>
+      <exclusions>
+        <!-- Use the JDK's HttpClient; keeps the shaded jar lean -->
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>netty-nio-client</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>apache-client</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>url-connection-client</artifactId>
+      <version>2.29.45</version>
+    </dependency>
+    <!-- PostgreSQL driver: used when DATABASE_URL is configured -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.4</version>
+    </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
       <artifactId>junit-jupiter-api</artifactId>

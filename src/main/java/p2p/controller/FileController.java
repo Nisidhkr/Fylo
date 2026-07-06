@@ -5,26 +5,50 @@ import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpHandler;
 import com.sun.net.httpserver.HttpServer;
-import org.apache.commons.fileupload.MultipartStream;
+// (multipart streaming now lives in p2p.utils.MultipartUploads)
+import p2p.api.ApiRouter;
+import p2p.auth.AuthService;
+import p2p.auth.JwtService;
+import p2p.auth.SessionService;
 import p2p.device.DeviceDiscoveryService;
 import p2p.device.DeviceIdentity;
 import p2p.device.DevicePresenceManager;
 import p2p.device.DeviceRegistry;
 import p2p.device.HeartbeatService;
+import p2p.device.QrPairingService;
+import p2p.device.TrustedDeviceService;
+import p2p.engine.TransferEngine;
 import p2p.lan.ControlPlaneClient;
 import p2p.lan.IncomingOffer;
 import p2p.lan.LanMessages;
 import p2p.lan.LanShareService;
 import p2p.lan.OfferManager;
+import p2p.observability.Metrics;
+import p2p.plan.PlanService;
 import p2p.protocol.PeerLinkProtocol;
+import p2p.security.FileSafetyService;
+import p2p.security.RateLimiter;
 import p2p.protocol.TransferException;
 import p2p.protocol.TransferManifest;
 import p2p.service.FileSharer;
+import p2p.share.DirectShareService;
+import p2p.share.LinkShareService;
+import p2p.share.UsernameShareService;
+import p2p.storage.StorageProvider;
+import p2p.storage.StorageProviders;
+import p2p.user.PgUserRepository;
+import p2p.user.UserRepository;
 import p2p.transfer.FileReceiver;
 import p2p.transfer.PeerClient;
 import p2p.transfer.TransferConfig;
 import p2p.transfer.TransferManager;
+import p2p.user.JsonUserRepository;
+import p2p.user.NotificationService;
+import p2p.user.PresenceService;
+import p2p.user.TransferHistoryService;
+import p2p.user.UserService;
 import p2p.util.Hashing;
+import p2p.utils.MultipartUploads;
 
 import java.io.BufferedOutputStream;
 import java.io.IOException;
@@ -107,6 +131,13 @@ public class FileController {
     private final LanShareService lanShareService;
     private final ControlPlaneClient controlPlane;
 
+    // Unified platform layer: ONE engine, ONE auth, ONE storage, ONE API.
+    private final TransferEngine engine;
+    private final DirectShareService directShare;
+    private final LinkShareService linkShare;
+    private final RateLimiter rateLimiter;
+    private final Metrics metrics;
+
     public FileController(int port) throws IOException {
         this(port,
                 Path.of(System.getProperty("peerlink.data.dir",
@@ -137,11 +168,52 @@ public class FileController {
         // instead of pinning one of N pool threads for the whole transfer.
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
 
+        // ── Unified platform: one engine + one auth/user/storage layer ──
+        // Storage backend chosen by FYLO_STORAGE (local | minio | s3).
+        StorageProvider storage = StorageProviders.fromEnv(dataDir);
+        this.engine = new TransferEngine(fileSharer, transferManager, storage);
+        this.directShare = new DirectShareService(engine);
+
+        JwtService jwtService = new JwtService(dataDir);
+        SessionService sessionService = new SessionService();
+        // The ONE database seam: PostgreSQL when DATABASE_URL is set,
+        // JSON file otherwise. Same interface either way.
+        UserRepository userRepository = PgUserRepository.fromEnv()
+                .<UserRepository>map(pg -> pg)
+                .orElseGet(() -> new JsonUserRepository(dataDir));
+        AuthService authService = new AuthService(userRepository, jwtService, sessionService);
+        PresenceService userPresence = new PresenceService();
+        NotificationService notifications = new NotificationService();
+        TransferHistoryService history = new TransferHistoryService();
+        UserService userService = new UserService(userRepository, userPresence);
+        UsernameShareService usernameShare = new UsernameShareService(
+                engine, userRepository, userPresence, notifications, history);
+        PlanService planService = new PlanService(dataDir);
+        this.linkShare = new LinkShareService(engine, history, planService,
+                new FileSafetyService(), dataDir);
+        TrustedDeviceService trustedDevices = new TrustedDeviceService(deviceRegistry);
+        QrPairingService pairingService = new QrPairingService(identity, deviceRegistry, boundPort);
+
+        this.rateLimiter = new RateLimiter();
+        this.metrics = new Metrics();
+        metrics.registerJvmGauges();
+        metrics.gauge("fylo_transfers_active", () -> transferManager.snapshots().stream()
+                .filter(t -> t.status().equals("ACTIVE")).count());
+        metrics.gauge("fylo_transfers_queued", () -> transferManager.snapshots().stream()
+                .filter(t -> t.status().equals("QUEUED")).count());
+
+        ApiRouter apiRouter = new ApiRouter(authService, userService, userPresence,
+                notifications, history, usernameShare, linkShare, directShare, engine,
+                trustedDevices, pairingService, identity, uploadDir,
+                planService, rateLimiter, metrics);
+
         server.createContext("/upload", new UploadHandler());
         server.createContext("/download", new DownloadHandler());
         server.createContext("/lan", new LanHandler());
         server.createContext("/transfers", new TransfersHandler());
+        server.createContext("/metrics", metrics.handler());
         server.createContext("/", new CORSHandler());
+        apiRouter.mount(server);
         server.setExecutor(executor);
     }
 
@@ -169,8 +241,8 @@ public class FileController {
         } catch (IOException ignored) {
         }
         presenceManager.close();
-        transferManager.close();
-        fileSharer.close();
+        linkShare.close();
+        engine.close(); // closes the transfer manager and all active shares
         executor.shutdown();
         System.out.println("API server stopped");
     }
@@ -186,6 +258,19 @@ public class FileController {
 
     public int port() {
         return server.getAddress().getPort();
+    }
+
+    /** Shared token-bucket check for the gateway endpoints; 429 on reject. */
+    private boolean allowRate(HttpExchange exchange, RateLimiter.Policy policy)
+            throws IOException {
+        String client = exchange.getRemoteAddress().getAddress().getHostAddress();
+        if (rateLimiter.tryAcquire(client, policy)) {
+            return true;
+        }
+        exchange.getResponseHeaders().set("Retry-After",
+                Long.toString(policy.retryAfterSeconds()));
+        sendText(exchange, 429, "Too many requests");
+        return false;
     }
 
     private static void addCors(HttpExchange exchange) {
@@ -244,12 +329,15 @@ public class FileController {
                 sendText(exchange, 405, "Method Not Allowed");
                 return;
             }
+            if (!allowRate(exchange, RateLimiter.Policy.UPLOAD)) {
+                return;
+            }
             String contentType = exchange.getRequestHeaders().getFirst("Content-Type");
             if (contentType == null || !contentType.startsWith("multipart/form-data")) {
                 sendText(exchange, 400, "Bad Request: Content-Type must be multipart/form-data");
                 return;
             }
-            String boundary = extractBoundary(contentType);
+            String boundary = MultipartUploads.extractBoundary(contentType);
             if (boundary == null) {
                 sendText(exchange, 400, "Bad Request: missing multipart boundary");
                 return;
@@ -257,21 +345,23 @@ public class FileController {
 
             Path savedFile = null;
             try {
-                savedFile = streamUploadToDisk(exchange.getRequestBody(), boundary);
+                savedFile = MultipartUploads.streamFirstFileToDir(
+                        exchange.getRequestBody(), boundary, uploadDir);
                 if (savedFile == null) {
                     sendText(exchange, 400, "Bad Request: no file field in request");
                     return;
                 }
 
                 String relativePath = exchange.getRequestHeaders().getFirst("X-Relative-Path");
-                FileSharer.Offer offer = fileSharer.offer(savedFile,
+                DirectShareService.DirectShare share = directShare.create(savedFile,
                         relativePath != null && !relativePath.isBlank() ? relativePath : null);
-                FileSharer.ShareInfo info = fileSharer.shareInfo(offer.port()).orElseThrow();
                 sendJson(exchange, 200, Map.of(
-                        "port", offer.port(),
-                        "token", offer.token(),
-                        "name", info.fileName(),
-                        "size", info.size()));
+                        "port", share.port(),
+                        "token", share.token(),
+                        "code", share.code(),
+                        "qr", share.qrPayload(),
+                        "name", share.fileName(),
+                        "size", share.size()));
             } catch (Exception e) {
                 System.err.println("Error processing upload: " + e);
                 if (savedFile != null) {
@@ -279,51 +369,6 @@ public class FileController {
                 }
                 sendText(exchange, 500, "Server error while storing upload");
             }
-        }
-
-        /**
-         * Streams the first file part directly to disk through a 64 KB buffer:
-         * memory use is constant regardless of file size.
-         */
-        private Path streamUploadToDisk(InputStream body, String boundary) throws IOException {
-            MultipartStream multipart = new MultipartStream(
-                    body, boundary.getBytes(StandardCharsets.ISO_8859_1), COPY_BUFFER_BYTES, null);
-            Path savedFile = null;
-            boolean hasNext = multipart.skipPreamble();
-            while (hasNext) {
-                String partHeaders = multipart.readHeaders();
-                Matcher matcher = FILENAME_PATTERN.matcher(partHeaders);
-                if (savedFile == null && matcher.find()) {
-                    String safeName = FileReceiver.sanitizeFilename(matcher.group(1));
-                    Path destination = uploadDir.resolve(UUID.randomUUID() + "_" + safeName);
-                    try (OutputStream out = new BufferedOutputStream(
-                            Files.newOutputStream(destination), COPY_BUFFER_BYTES)) {
-                        multipart.readBodyData(out);
-                    }
-                    savedFile = destination;
-                } else {
-                    multipart.discardBodyData();
-                }
-                hasNext = multipart.readBoundary();
-            }
-            return savedFile;
-        }
-
-        private String extractBoundary(String contentType) {
-            int index = contentType.indexOf("boundary=");
-            if (index == -1) {
-                return null;
-            }
-            String boundary = contentType.substring(index + "boundary=".length());
-            int semicolon = boundary.indexOf(';');
-            if (semicolon != -1) {
-                boundary = boundary.substring(0, semicolon);
-            }
-            boundary = boundary.trim();
-            if (boundary.startsWith("\"") && boundary.endsWith("\"") && boundary.length() >= 2) {
-                boundary = boundary.substring(1, boundary.length() - 1);
-            }
-            return boundary.isEmpty() ? null : boundary;
         }
     }
 
@@ -335,6 +380,9 @@ public class FileController {
             }
             if (!exchange.getRequestMethod().equalsIgnoreCase("GET")) {
                 sendText(exchange, 405, "Method Not Allowed");
+                return;
+            }
+            if (!allowRate(exchange, RateLimiter.Policy.DOWNLOAD)) {
                 return;
             }
 
