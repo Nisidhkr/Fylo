@@ -387,12 +387,14 @@ Working transfer engine, binary protocol, mDNS discovery, LAN offers/trust, queu
 7. **Unified API** — `ApiRouter` mounted on the same server; legacy routes unchanged so the current UI keeps working.
 8. **Dedup** — multipart streaming unified in `MultipartUploads`.
 
-### Phase 2 — hardening (next)
-- `UserRepository` → PostgreSQL (JDBC/Hikari); `links.json`, history, sessions → tables. Schema already sketched in `FYLO_PROJECT_BACKBONE.md` §5.
-- `StorageProvider` → MinIO/S3 implementation (multipart PUT, presigned GET for `/s/{slug}` offload).
-- WebSocket push channel fed by the existing `NotificationService` queues; presence from socket lifecycle instead of poll TTL.
-- TLS termination + rate limiting at the reverse proxy; device tokens (`JwtService.TokenType.DEVICE`) for headless daemons.
-- Server-relayed rendezvous for Direct Share across NATs (share code resolves to a relay session instead of a raw port when direct connect fails).
+### Phase 2 — hardening ✅ DELIVERED
+- ✅ `UserRepository` → PostgreSQL (`PgUserRepository`); transfer sessions/requests/history → `Pg*Repository` over V1-V3 migrations (JSON-file fallbacks without `DATABASE_URL`).
+- ✅ `StorageProvider` → MinIO/S3 (`S3CompatibleStorageProvider`, multipart PUT ≥ 64 MB, ranged GET).
+- ✅ WebSocket push (`p2p.ws.WebSocketServer` RFC 6455 on port+1, `WebSocketNotifier` facade) fed by `NotificationService`, `UsernameShareService`, and `TransferManager` progress/status events; Redis pub/sub fan-out across instances.
+- ✅ Redis integration (`p2p.infra.RedisClient`): shared rate-limit counters, single-use refresh sessions + rotation blacklist, cross-instance presence — all with in-memory fallbacks.
+- ✅ `/health` + `/actuator/health` (component checks: database/redis/storage), Prometheus metrics expanded (transfer bytes/errors/duration histogram, WS connections, storage used), alert rules + Grafana dashboard in `deploy/`.
+- ✅ Kubernetes manifests (`k8s/`: HPA, probes, StatefulSets, ingress with TLS + WS routing), Testcontainers integration tests (Postgres + MinIO), Gatling load simulations (`src/test/scala/p2p/load`).
+- Remaining for Part 3: server-relayed rendezvous for Direct Share across NATs; presigned-GET offload for `/s/{slug}`.
 
 ### Phase 3 — ecosystem (later)
 Clipboard/notification/photo/folder sync and cross-device file access all ride the existing rails: trusted-device gating via `TrustedDeviceService`, transport via `TransferEngine`, addressing via `DeviceRegistry`. Optional package rename `p2p` → `com.fylo` as a single mechanical refactor once Part 2 lands.

@@ -40,7 +40,9 @@ class PlanEnforcementTest {
     private PlanService plans;
     private LinkShareService links;
     private JsonUserRepository users;
-    private final AuthContext user = new AuthContext("user-1", "nisidh");
+    // History persists by UUID (transfer_history.user_id), so use a real one.
+    private final AuthContext user = new AuthContext(
+            java.util.UUID.randomUUID().toString(), "nisidh");
 
     @BeforeEach
     void setUp() throws IOException {
@@ -50,8 +52,10 @@ class PlanEnforcementTest {
         users = new JsonUserRepository(dataDir);
         users.save(new User(user.userId(), user.username(), user.username(), null,
                 "x", "FREE", 0, System.currentTimeMillis()));
-        links = new LinkShareService(engine, new TransferHistoryService(), plans,
-                new FileSafetyService(true), users, dataDir);
+        links = new LinkShareService(engine,
+                new TransferHistoryService(
+                        new p2p.transfer.JsonTransferHistoryRepository(dataDir)),
+                plans, new FileSafetyService(true), users, dataDir);
     }
 
     @AfterEach

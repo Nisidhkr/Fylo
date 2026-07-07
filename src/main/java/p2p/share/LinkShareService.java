@@ -188,6 +188,11 @@ public final class LinkShareService implements AutoCloseable {
         return activeLinksFor(userId).stream().mapToLong(ShareLink::sizeBytes).sum();
     }
 
+    /** Platform-wide stored bytes (fylo_storage_used_bytes gauge). */
+    public long totalStorageBytes() {
+        return linksBySlug.values().stream().mapToLong(ShareLink::sizeBytes).sum();
+    }
+
     public int activeLinkCount(String userId) {
         return activeLinksFor(userId).size();
     }

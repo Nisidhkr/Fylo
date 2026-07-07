@@ -204,6 +204,49 @@ presets), and benchmark numbers.
   rate limiting — see the security section of
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
 
+## What's Running
+
+One backend process serves everything:
+
+| Surface | Where |
+|---|---|
+| REST API (all four modes) | `http://localhost:9090` — `/api/v1/**` per [docs/openapi.yaml](docs/openapi.yaml) |
+| Gateway (legacy UI routes) | `/upload`, `/download/{port}`, `/lan/*`, `/transfers` |
+| Public link downloads | `GET /s/{slug}` (Range supported) |
+| WebSocket events | `ws://localhost:9091/ws/events?token=<accessToken>` (RFC 6455; `GET /ws/events` on 9090 answers 426 with this URL) |
+| Health (K8s probes) | `GET /health` and `GET /actuator/health` |
+| Prometheus metrics | `GET /metrics` |
+
+Environment variables (all optional — defaults give a zero-infra single node):
+
+| Variable | Values | Default |
+|---|---|---|
+| `FYLO_STORAGE` | `local` \| `minio` \| `s3` | `local` |
+| `DATABASE_URL` | `jdbc:postgresql://…` | none → JSON files |
+| `DATABASE_USER` / `DATABASE_PASSWORD` | string | `fylo` / empty |
+| `REDIS_URL` | `redis://…` | none → in-memory |
+| `S3_ENDPOINT` / `S3_REGION` / `S3_BUCKET` | url / region / name | none |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | string | none |
+| `PORT` | number | `9090` (WebSocket = PORT+1) |
+| `FYLO_BLOCK_EXECUTABLES` | `true` \| `false` | `true` |
+
+Quick start (plain Java, no Docker):
+
+```bash
+mvn package -DskipTests
+java -jar target/p2p-1.0-SNAPSHOT.jar
+```
+
+Quick start (full stack — Postgres, MinIO, Redis-ready, Prometheus, Grafana):
+
+```bash
+docker compose up --build
+```
+
+Load tests (Gatling, against a running backend): `mvn gatling:test
+-Dgatling.simulationClass=p2p.load.FyloLoadSimulation`. Kubernetes
+manifests for production live in [k8s/](k8s/) (`kubectl apply -k k8s/`).
+
 ## Deployment
 
 For detailed deployment instructions, see [DEPLOYMENT.md](DEPLOYMENT.md).

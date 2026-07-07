@@ -24,11 +24,41 @@ import java.util.function.LongSupplier;
  */
 public final class Metrics {
 
+    /** Prometheus-convention duration buckets (seconds). */
+    private static final double[] DURATION_BUCKETS = {1, 5, 15, 60, 300, 900};
+
+    private static final class Histogram {
+        final LongAdder[] buckets = new LongAdder[DURATION_BUCKETS.length + 1];
+        final LongAdder count = new LongAdder();
+        final java.util.concurrent.atomic.DoubleAdder sum =
+                new java.util.concurrent.atomic.DoubleAdder();
+
+        Histogram() {
+            for (int i = 0; i < buckets.length; i++) {
+                buckets[i] = new LongAdder();
+            }
+        }
+    }
+
     private final ConcurrentHashMap<String, LongAdder> counters = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, LongSupplier> gauges = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Histogram> histograms = new ConcurrentHashMap<>();
 
     public void increment(String series) {
         add(series, 1);
+    }
+
+    /** Records one observation into a cumulative histogram (seconds). */
+    public void observeDurationSeconds(String name, double seconds) {
+        Histogram histogram = histograms.computeIfAbsent(name, n -> new Histogram());
+        for (int i = 0; i < DURATION_BUCKETS.length; i++) {
+            if (seconds <= DURATION_BUCKETS[i]) {
+                histogram.buckets[i].increment();
+            }
+        }
+        histogram.buckets[DURATION_BUCKETS.length].increment(); // +Inf
+        histogram.count.increment();
+        histogram.sum.add(seconds);
     }
 
     public void add(String series, long delta) {
@@ -50,7 +80,26 @@ public final class Metrics {
                 .sorted(Map.Entry.comparingByKey())
                 .forEach(e -> out.append(e.getKey()).append(' ')
                         .append(e.getValue().getAsLong()).append('\n'));
+        histograms.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> {
+                    String name = e.getKey();
+                    Histogram h = e.getValue();
+                    for (int i = 0; i < DURATION_BUCKETS.length; i++) {
+                        out.append(name).append("_bucket{le=\"")
+                                .append(trimTrailingZero(DURATION_BUCKETS[i]))
+                                .append("\"} ").append(h.buckets[i].sum()).append('\n');
+                    }
+                    out.append(name).append("_bucket{le=\"+Inf\"} ")
+                            .append(h.buckets[DURATION_BUCKETS.length].sum()).append('\n');
+                    out.append(name).append("_sum ").append(h.sum.sum()).append('\n');
+                    out.append(name).append("_count ").append(h.count.sum()).append('\n');
+                });
         return out.toString();
+    }
+
+    private static String trimTrailingZero(double value) {
+        return value == Math.floor(value) ? Long.toString((long) value) : Double.toString(value);
     }
 
     /** Handler for the /metrics scrape endpoint. */

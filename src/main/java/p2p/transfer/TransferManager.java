@@ -96,13 +96,27 @@ public final class TransferManager implements Closeable {
     }
 
     private static final int MAX_HISTORY = 200;
+    private static final long PROGRESS_EVENT_INTERVAL_MS = 2_000; // backbone §6.4
 
     private final ConcurrentHashMap<String, Transfer> transfers = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final Semaphore activeSlots;
 
+    // Real-time + observability hooks (backbone §6.4, §17); optional so the
+    // engine stays usable in tests and headless embeddings.
+    private volatile p2p.ws.WebSocketNotifier notifier;
+    private volatile p2p.observability.Metrics metrics;
+
     public TransferManager(int maxConcurrentTransfers) {
         this.activeSlots = new Semaphore(maxConcurrentTransfers);
+    }
+
+    public void setNotifier(p2p.ws.WebSocketNotifier notifier) {
+        this.notifier = notifier;
+    }
+
+    public void setMetrics(p2p.observability.Metrics metrics) {
+        this.metrics = metrics;
     }
 
     /** Queues a receive; starts as soon as a slot is free. */
@@ -209,7 +223,26 @@ public final class TransferManager implements Closeable {
                     transfer.spec.host(), transfer.spec.port(), transfer.spec.token(),
                     transfer.spec.targetDirectory(), TransferConfig.lan());
             transfer.activeReceiver = receiver;
-            receiver.download(snapshot -> transfer.lastProgress = snapshot);
+            // Throttled progress fan-out: WS event + byte counter every ~2 s.
+            long[] lastEvent = {System.currentTimeMillis()};
+            long[] lastBytes = {0};
+            receiver.download(snapshot -> {
+                transfer.lastProgress = snapshot;
+                long now = System.currentTimeMillis();
+                if (now - lastEvent[0] >= PROGRESS_EVENT_INTERVAL_MS) {
+                    lastEvent[0] = now;
+                    if (metrics != null) {
+                        metrics.add("fylo_transfer_bytes_total",
+                                snapshot.transferredBytes() - lastBytes[0]);
+                    }
+                    lastBytes[0] = snapshot.transferredBytes();
+                    if (notifier != null) {
+                        notifier.sendProgress(transfer.id, snapshot.transferredBytes(),
+                                transfer.totalBytes,
+                                (long) (snapshot.megabytesPerSecond() * 1_000_000));
+                    }
+                }
+            });
             transfer.status = Status.COMPLETED;
         } catch (IOException e) {
             if (transfer.pauseRequested) {
@@ -224,10 +257,32 @@ public final class TransferManager implements Closeable {
         } finally {
             transfer.activeReceiver = null;
             activeSlots.release();
+            emitTerminal(transfer);
             if (transfer.onTerminal != null
                     && (transfer.status == Status.COMPLETED || transfer.status == Status.FAILED
                         || transfer.status == Status.CANCELLED)) {
                 transfer.onTerminal.accept(transfer);
+            }
+        }
+    }
+
+    /** Terminal-state observability: WS TRANSFER_STATUS + metrics (§6.4, §17). */
+    private void emitTerminal(Transfer transfer) {
+        Status status = transfer.status;
+        if (status != Status.COMPLETED && status != Status.FAILED
+                && status != Status.CANCELLED) {
+            return;
+        }
+        if (notifier != null) {
+            notifier.sendStatus(transfer.id, status.name(), null);
+        }
+        if (metrics != null) {
+            if (status == Status.FAILED) {
+                metrics.increment("fylo_transfer_errors_total");
+            }
+            if (status == Status.COMPLETED) {
+                metrics.observeDurationSeconds("fylo_transfer_duration_seconds",
+                        (System.currentTimeMillis() - transfer.createdAtEpochMs) / 1000.0);
             }
         }
     }

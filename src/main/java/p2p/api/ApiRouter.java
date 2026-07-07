@@ -84,6 +84,9 @@ public final class ApiRouter {
     private final PlanService plans;
     private final RateLimiter rateLimiter;
     private final Metrics metrics;
+    // Set by the composition root before mount().
+    private volatile p2p.observability.HealthService health;
+    private volatile int wsPort;
 
     public ApiRouter(AuthService auth, UserService userService, PresenceService presence,
                      NotificationService notifications, TransferHistoryService history,
@@ -110,10 +113,45 @@ public final class ApiRouter {
         this.metrics = metrics;
     }
 
+    public void setHealth(p2p.observability.HealthService health) {
+        this.health = health;
+    }
+
+    public void setWebSocketPort(int wsPort) {
+        this.wsPort = wsPort;
+    }
+
     /** Mounts the unified routes onto the shared server. */
     public void mount(HttpServer server) {
         server.createContext("/api/v1", exchange -> dispatch(exchange, this::routeApi));
         server.createContext("/s/", exchange -> dispatch(exchange, this::routePublicLink));
+        if (health != null) {
+            // Backbone §14.4: /health + Spring-Actuator-compatible alias.
+            server.createContext("/health", health.handler());
+            server.createContext("/actuator/health", health.handler());
+        }
+        server.createContext("/ws/events", exchange -> dispatch(exchange, this::routeWsInfo));
+    }
+
+    /**
+     * The WebSocket endpoint lives on its own listener (plain HttpServer
+     * cannot hand its socket to an upgrade). This HTTP route enforces the
+     * backbone contract: 401 without a valid token, else 426 Upgrade
+     * Required carrying the real ws:// URL for the client to dial.
+     */
+    private void routeWsInfo(HttpExchange exchange, String method, String path)
+            throws IOException {
+        String token = queryParam(exchange, "token");
+        if (auth.authenticate(token).isEmpty()) {
+            throw new ApiError(401, "Missing or invalid token");
+        }
+        exchange.getResponseHeaders().set("Upgrade", "websocket");
+        String host = exchange.getRequestHeaders().getFirst("Host");
+        String hostname = host == null ? "localhost"
+                : (host.contains(":") ? host.substring(0, host.indexOf(':')) : host);
+        sendJson(exchange, 426, Map.of(
+                "error", "Upgrade Required",
+                "wsUrl", "ws://" + hostname + ":" + wsPort + "/ws/events?token=<accessToken>"));
     }
 
     private interface Route {

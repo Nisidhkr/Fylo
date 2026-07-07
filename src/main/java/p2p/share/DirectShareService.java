@@ -4,14 +4,16 @@ import p2p.engine.ShareCodes;
 import p2p.engine.TransferEngine;
 import p2p.engine.TransferSource;
 import p2p.security.TransferTokens;
+import p2p.transfer.TransferSessionRecord;
+import p2p.transfer.TransferSessionRepository;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.time.Instant;
 import java.util.Map;
 import java.util.Optional;
 import java.util.UUID;
-import java.util.concurrent.ConcurrentHashMap;
 
 /**
  * MODE 1 — Direct Share (guest, live). Sender uploads a file to their own
@@ -47,25 +49,29 @@ public final class DirectShareService {
     private static final long SESSION_TTL_MS = 10 * 60_000; // backbone: 10 minutes
 
     private final TransferEngine engine;
-    private final ConcurrentHashMap<String, DirectSession> sessionsByCode =
-            new ConcurrentHashMap<>();
+    private final TransferSessionRepository sessions;
 
-    public DirectShareService(TransferEngine engine) {
+    public DirectShareService(TransferEngine engine, TransferSessionRepository sessions) {
         this.engine = engine;
+        this.sessions = sessions;
     }
 
-    /** Sender creates a rendezvous session and gets its code + token. */
+    /**
+     * Sender creates a rendezvous session and gets its code + token. The
+     * session is persisted to {@code transfer_sessions} (backbone §5.2), so
+     * with PostgreSQL any backend instance can answer the join.
+     */
     public DirectSession initiate(String fileName, long fileSizeBytes, String checksum) {
-        purgeExpired();
-        String code;
-        do {
-            code = ShareCodes.generateSessionCode();
-        } while (sessionsByCode.containsKey(code));
-        DirectSession session = new DirectSession(UUID.randomUUID().toString(), code,
-                TransferTokens.generate(), fileName, fileSizeBytes, checksum,
-                System.currentTimeMillis() + SESSION_TTL_MS, DirectSession.State.PENDING);
-        sessionsByCode.put(code, session);
-        return session;
+        String code = ShareCodes.generateSessionCode();
+        Instant now = Instant.now();
+        TransferSessionRecord record = new TransferSessionRecord(
+                UUID.randomUUID(), "DIRECT", null, null, null, null,
+                "PENDING", fileName, 0, fileSizeBytes, null,
+                TransferTokens.generate(), code, null, null, null, now, now);
+        sessions.save(record);
+        return new DirectSession(record.id().toString(), code, record.transferToken(),
+                fileName, fileSizeBytes, checksum,
+                now.toEpochMilli() + SESSION_TTL_MS, DirectSession.State.PENDING);
     }
 
     /** Receiver presents the code; on success the session flips to CONNECTING. */
@@ -73,20 +79,19 @@ public final class DirectShareService {
         if (code == null || code.isBlank()) {
             return Optional.empty();
         }
-        DirectSession session = sessionsByCode.get(code.strip().toUpperCase(java.util.Locale.ROOT));
-        if (session == null || session.expired()) {
-            return Optional.empty();
-        }
-        DirectSession connecting = new DirectSession(session.sessionId(), session.sessionCode(),
-                session.transferToken(), session.fileName(), session.fileSizeBytes(),
-                session.checksum(), session.expiresAtEpochMs(), DirectSession.State.CONNECTING);
-        sessionsByCode.put(session.sessionCode(), connecting);
-        return Optional.of(connecting);
-    }
-
-    /** Lazy expiry: sessions are few and short-lived; purge on each initiate. */
-    private void purgeExpired() {
-        sessionsByCode.values().removeIf(DirectSession::expired);
+        String normalized = code.strip().toUpperCase(java.util.Locale.ROOT);
+        return sessions.findBySessionCode(normalized)
+                .filter(s -> "PENDING".equals(s.status()))
+                .filter(s -> s.createdAt().toEpochMilli() + SESSION_TTL_MS
+                        > System.currentTimeMillis())
+                .map(s -> {
+                    sessions.updateStatus(s.id(), "CONNECTING");
+                    return new DirectSession(s.id().toString(), s.sessionCode(),
+                            s.transferToken(), s.fileName(),
+                            s.totalBytes() == null ? 0 : s.totalBytes(), null,
+                            s.createdAt().toEpochMilli() + SESSION_TTL_MS,
+                            DirectSession.State.CONNECTING);
+                });
     }
 
     /** Offers an already-uploaded (or local) file and mints its share code. */

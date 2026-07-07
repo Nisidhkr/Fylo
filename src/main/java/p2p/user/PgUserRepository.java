@@ -149,6 +149,16 @@ public final class PgUserRepository implements UserRepository {
                 rs.getTimestamp("created_at").getTime());
     }
 
+    /** Health probe: SELECT 1 (backbone §14.4). */
+    public boolean ping() {
+        try (Connection conn = connect();
+             PreparedStatement ps = conn.prepareStatement("SELECT 1")) {
+            return ps.executeQuery().next();
+        } catch (SQLException e) {
+            return false;
+        }
+    }
+
     private Connection connect() throws SQLException {
         return DriverManager.getConnection(url, user, password);
     }

@@ -137,6 +137,8 @@ public class FileController {
     private final LinkShareService linkShare;
     private final RateLimiter rateLimiter;
     private final Metrics metrics;
+    private final p2p.infra.RedisClient redis;
+    private final p2p.ws.WebSocketServer wsServer;
 
     public FileController(int port) throws IOException {
         this(port,
@@ -168,45 +170,97 @@ public class FileController {
         // instead of pinning one of N pool threads for the whole transfer.
         this.executor = Executors.newVirtualThreadPerTaskExecutor();
 
-        // ── Unified platform: one engine + one auth/user/storage layer ──
-        // Storage backend chosen by FYLO_STORAGE (local | minio | s3).
+        // ── Unified platform composition root (backbone init order §I.1) ──
+        // 1. Redis (optional; everything degrades to in-memory without it).
+        this.redis = p2p.infra.RedisClient.fromEnv();
+        System.out.println("Redis: " + (redis.isAvailable() ? "connected"
+                : (redis.isConfigured() ? "CONFIGURED BUT UNREACHABLE — in-memory fallbacks"
+                                        : "not configured — in-memory mode")));
+
+        // 2. Storage backend chosen by FYLO_STORAGE (local | minio | s3).
         StorageProvider storage = StorageProviders.fromEnv(dataDir);
         this.engine = new TransferEngine(fileSharer, transferManager, storage);
-        this.directShare = new DirectShareService(engine);
 
-        JwtService jwtService = new JwtService(dataDir);
-        SessionService sessionService = new SessionService();
-        // The ONE database seam: PostgreSQL when DATABASE_URL is set,
-        // JSON file otherwise. Same interface either way.
+        // 3-6. The ONE database seam: PostgreSQL repositories when
+        // DATABASE_URL is set, JSON files otherwise. Same interfaces.
         UserRepository userRepository = PgUserRepository.fromEnv()
                 .<UserRepository>map(pg -> pg)
                 .orElseGet(() -> new JsonUserRepository(dataDir));
+        p2p.transfer.TransferSessionRepository sessionRepo =
+                p2p.transfer.PgTransferSessionRepository.fromEnv()
+                        .<p2p.transfer.TransferSessionRepository>map(pg -> pg)
+                        .orElseGet(() -> new p2p.transfer.JsonTransferSessionRepository(dataDir));
+        p2p.transfer.TransferRequestRepository requestRepo =
+                p2p.transfer.PgTransferRequestRepository.fromEnv()
+                        .<p2p.transfer.TransferRequestRepository>map(pg -> pg)
+                        .orElseGet(() -> new p2p.transfer.JsonTransferRequestRepository(dataDir));
+        p2p.transfer.TransferHistoryRepository historyRepo =
+                p2p.transfer.PgTransferHistoryRepository.fromEnv()
+                        .<p2p.transfer.TransferHistoryRepository>map(pg -> pg)
+                        .orElseGet(() -> new p2p.transfer.JsonTransferHistoryRepository(dataDir));
+
+        this.directShare = new DirectShareService(engine, sessionRepo);
+
+        JwtService jwtService = new JwtService(dataDir);
+        SessionService sessionService = new SessionService(redis);
         PlanService planService = new PlanService(dataDir);
         AuthService authService = new AuthService(userRepository, jwtService, sessionService,
                 planService);
-        PresenceService userPresence = new PresenceService();
+        PresenceService userPresence = new PresenceService(redis);
         NotificationService notifications = new NotificationService();
-        TransferHistoryService history = new TransferHistoryService();
+        TransferHistoryService history = new TransferHistoryService(historyRepo);
         UserService userService = new UserService(userRepository, userPresence);
         UsernameShareService usernameShare = new UsernameShareService(
                 engine, userRepository, userPresence, notifications, history);
+        usernameShare.setPersistence(sessionRepo, requestRepo);
         this.linkShare = new LinkShareService(engine, history, planService,
                 new FileSafetyService(), userRepository, dataDir);
         TrustedDeviceService trustedDevices = new TrustedDeviceService(deviceRegistry);
         QrPairingService pairingService = new QrPairingService(identity, deviceRegistry, boundPort);
 
-        this.rateLimiter = new RateLimiter();
+        // 7-8. WebSocket server (own listener: API port + 1) + notifier.
+        this.wsServer = new p2p.ws.WebSocketServer(boundPort + 1, authService, redis);
+        p2p.ws.WebSocketNotifier notifier = p2p.ws.WebSocketNotifier.over(wsServer);
+        usernameShare.setNotifier(notifier);
+        notifications.setNotifier(notifier);
+        transferManager.setNotifier(notifier);
+
+        // 10. Rate limiting: Redis-shared when available, else in-process.
+        this.rateLimiter = new RateLimiter(redis);
         this.metrics = new Metrics();
+        transferManager.setMetrics(metrics);
         metrics.registerJvmGauges();
         metrics.gauge("fylo_transfers_active", () -> transferManager.snapshots().stream()
                 .filter(t -> t.status().equals("ACTIVE")).count());
+        metrics.gauge("fylo_transfer_active_total", () -> transferManager.snapshots().stream()
+                .filter(t -> t.status().equals("ACTIVE")).count());
         metrics.gauge("fylo_transfers_queued", () -> transferManager.snapshots().stream()
                 .filter(t -> t.status().equals("QUEUED")).count());
+        metrics.gauge("fylo_websocket_connections_active", wsServer::connectionCount);
+        metrics.gauge("fylo_storage_used_bytes", linkShare::totalStorageBytes);
 
+        // Health (backbone §14.4): DOWN only when a configured dependency
+        // is actually broken; unconfigured = healthy in-memory mode.
+        p2p.observability.HealthService healthService = new p2p.observability.HealthService()
+                .check("database", () -> !(userRepository instanceof PgUserRepository pg)
+                        || pg.ping())
+                .check("redis", () -> !redis.isConfigured() || redis.isAvailable())
+                .check("storage", () -> {
+                    try {
+                        storage.stat("health-check");
+                        return true;
+                    } catch (Exception e) {
+                        return false;
+                    }
+                });
+
+        // 11. The ONE API layer.
         ApiRouter apiRouter = new ApiRouter(authService, userService, userPresence,
                 notifications, history, usernameShare, linkShare, directShare, engine,
                 trustedDevices, pairingService, identity, uploadDir,
                 planService, rateLimiter, metrics);
+        apiRouter.setHealth(healthService);
+        apiRouter.setWebSocketPort(boundPort + 1);
 
         server.createContext("/upload", new UploadHandler());
         server.createContext("/download", new DownloadHandler());
@@ -221,6 +275,13 @@ public class FileController {
     public void start() {
         server.start();
         System.out.println("API server started on port " + server.getAddress().getPort());
+        try {
+            wsServer.start();
+            System.out.println("WebSocket events on ws://localhost:" + wsServer.port()
+                    + "/ws/events");
+        } catch (IOException e) {
+            System.err.println("WebSocket server unavailable: " + e.getMessage());
+        }
         presenceManager.start();
         // mDNS startup can take a few seconds and may fail on networks without
         // multicast; never block or break the web flow because of it.
@@ -237,6 +298,9 @@ public class FileController {
 
     public void stop() {
         server.stop(0);
+        wsServer.close();
+        linkShare.close();
+        redis.close();
         try {
             discoveryService.close();
         } catch (IOException ignored) {
