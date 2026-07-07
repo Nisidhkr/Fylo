@@ -34,6 +34,20 @@ public final class MultipartUploads {
      */
     public static Path streamFirstFileToDir(InputStream body, String boundary, Path targetDir)
             throws IOException {
+        return streamFirstFileToDir(body, boundary, targetDir, null, null);
+    }
+
+    /**
+     * Same, with plan enforcement hooks on the ingress loop: {@code throttle}
+     * paces byte acceptance (FREE = 2 MB/s; PREMIUM's unlimited throttle is a
+     * no-op) and {@code progress} receives the cumulative byte count for the
+     * live progress stream. This is THE upload chunk loop — bytes are delayed
+     * before they are accepted, not after.
+     */
+    public static Path streamFirstFileToDir(InputStream body, String boundary, Path targetDir,
+                                            p2p.transfer.UploadThrottle throttle,
+                                            java.util.function.LongConsumer progress)
+            throws IOException {
         MultipartStream multipart = new MultipartStream(
                 body, boundary.getBytes(StandardCharsets.ISO_8859_1), COPY_BUFFER_BYTES, null);
         Path savedFile = null;
@@ -45,7 +59,8 @@ public final class MultipartUploads {
                 String safeName = FileReceiver.sanitizeFilename(matcher.group(1));
                 Path destination = targetDir.resolve(UUID.randomUUID() + "_" + safeName);
                 try (OutputStream out = new BufferedOutputStream(
-                        Files.newOutputStream(destination), COPY_BUFFER_BYTES)) {
+                        wrap(Files.newOutputStream(destination), throttle, progress),
+                        COPY_BUFFER_BYTES)) {
                     multipart.readBodyData(out);
                 }
                 savedFile = destination;
@@ -55,6 +70,40 @@ public final class MultipartUploads {
             hasNext = multipart.readBoundary();
         }
         return savedFile;
+    }
+
+    /** Applies throttle.acquire(chunk) BEFORE each chunk is accepted. */
+    private static OutputStream wrap(OutputStream out,
+                                     p2p.transfer.UploadThrottle throttle,
+                                     java.util.function.LongConsumer progress) {
+        if (throttle == null && progress == null) {
+            return out;
+        }
+        return new java.io.FilterOutputStream(out) {
+            private long total;
+
+            @Override
+            public void write(byte[] chunk, int off, int len) throws IOException {
+                if (throttle != null) {
+                    try {
+                        throttle.acquire(len);
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                        throw new IOException("Upload interrupted", e);
+                    }
+                }
+                out.write(chunk, off, len);
+                total += len;
+                if (progress != null) {
+                    progress.accept(total);
+                }
+            }
+
+            @Override
+            public void write(int b) throws IOException {
+                write(new byte[]{(byte) b}, 0, 1);
+            }
+        };
     }
 
     /** Extracts the boundary parameter from a multipart/form-data Content-Type. */

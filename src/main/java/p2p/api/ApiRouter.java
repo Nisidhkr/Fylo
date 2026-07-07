@@ -87,6 +87,11 @@ public final class ApiRouter {
     // Set by the composition root before mount().
     private volatile p2p.observability.HealthService health;
     private volatile int wsPort;
+    private volatile p2p.transfer.UploadProgressRegistry uploadProgress;
+
+    public void setUploadProgress(p2p.transfer.UploadProgressRegistry registry) {
+        this.uploadProgress = registry;
+    }
 
     public ApiRouter(AuthService auth, UserService userService, PresenceService presence,
                      NotificationService notifications, TransferHistoryService history,
@@ -266,6 +271,7 @@ public final class ApiRouter {
 
             // Mode 4 — Link Share
             case "POST /links/upload" -> handleLinkUpload(exchange);
+            case "GET /uploads/{id}/progress" -> handleUploadProgress(exchange, path.split("/")[4]);
             case "GET /links" -> {
                 AuthContext ctx = require(exchange);
                 sendJson(exchange, 200, linkShare.listFor(ctx).stream()
@@ -438,11 +444,36 @@ public final class ApiRouter {
         if (boundary == null) {
             throw new ApiError(400, "Missing multipart boundary");
         }
+
+        // Plan-enforced ingress throttle (FREE 2 MB/s; PREMIUM = no-op) and
+        // live progress. Clients may supply ?uploadId=<uuid> so they can open
+        // the SSE stream BEFORE posting; otherwise one is generated.
+        Entitlements plan = plans.entitlementsFor(ctx.userId());
+        String uploadId = firstPresent(queryParam(exchange, "uploadId"),
+                java.util.UUID.randomUUID().toString());
+        long declaredTotal = optionalLong(
+                exchange.getRequestHeaders().getFirst("Content-Length"));
+        var throttle = new p2p.transfer.UploadThrottle(plan.uploadSpeedBytesPerSecond());
+        var progress = uploadProgress == null ? null
+                : uploadProgress.register(uploadId, declaredTotal);
+
         // Stream to a temp file first, then into storage: keeps the storage
         // write path identical for every provider and lets us hash in one pass.
-        Path tmp = MultipartUploads.streamFirstFileToDir(
-                exchange.getRequestBody(), boundary, uploadTmpDir);
+        Path tmp;
+        try {
+            tmp = MultipartUploads.streamFirstFileToDir(
+                    exchange.getRequestBody(), boundary, uploadTmpDir, throttle,
+                    progress == null ? null : progress.bytesTransferred::set);
+        } catch (IOException e) {
+            if (uploadProgress != null) {
+                uploadProgress.finish(uploadId, false);
+            }
+            throw e;
+        }
         if (tmp == null) {
+            if (uploadProgress != null) {
+                uploadProgress.finish(uploadId, false);
+            }
             throw new ApiError(400, "No file field in request");
         }
         try {
@@ -463,9 +494,73 @@ public final class ApiRouter {
                     MultipartUploads.stripUploadPrefix(tmp.getFileName().toString()),
                     size, options);
             metrics.add("fylo_link_upload_bytes_total", size);
-            sendJson(exchange, 201, linkView(link));
+            if (uploadProgress != null) {
+                uploadProgress.finish(uploadId, true);
+            }
+            Map<String, Object> view = new java.util.LinkedHashMap<>(linkView(link));
+            view.put("uploadId", uploadId);
+            sendJson(exchange, 201, view);
+        } catch (IOException | RuntimeException e) {
+            if (uploadProgress != null) {
+                uploadProgress.finish(uploadId, false);
+            }
+            throw e;
         } finally {
             Files.deleteIfExists(tmp);
+        }
+    }
+
+    /**
+     * SSE progress stream (backbone §6.4 fallback path for browsers, since
+     * EventSource cannot send Authorization headers the uploadId itself is
+     * the capability). Emits an event every 500 ms until terminal.
+     */
+    private void handleUploadProgress(HttpExchange exchange, String uploadId)
+            throws IOException {
+        var registry = uploadProgress;
+        var progress = registry == null
+                ? java.util.Optional.<p2p.transfer.UploadProgressRegistry.UploadProgress>empty()
+                : registry.find(uploadId);
+        if (progress.isEmpty()) {
+            throw new ApiError(404, "Unknown upload");
+        }
+        var state = progress.get();
+        exchange.getResponseHeaders().set("Content-Type", "text/event-stream");
+        exchange.getResponseHeaders().set("Cache-Control", "no-cache");
+        exchange.sendResponseHeaders(200, 0);
+        try (OutputStream out = exchange.getResponseBody()) {
+            long lastBytes = state.bytesTransferred.get();
+            long lastAtMs = System.currentTimeMillis();
+            while (true) {
+                long bytes = state.bytesTransferred.get();
+                long now = System.currentTimeMillis();
+                long speedBps = now > lastAtMs
+                        ? (bytes - lastBytes) * 1000 / Math.max(1, now - lastAtMs) : 0;
+                long total = state.totalBytes;
+                double percentage = total > 0
+                        ? Math.min(100.0, Math.round(1000.0 * bytes / total) / 10.0) : 0;
+                long eta = speedBps > 0 && total > bytes ? (total - bytes) / speedBps : -1;
+                String event = "data: {\"uploadId\":\"" + state.uploadId
+                        + "\",\"bytesTransferred\":" + bytes
+                        + ",\"totalBytes\":" + total
+                        + ",\"percentage\":" + percentage
+                        + ",\"speedBps\":" + speedBps
+                        + ",\"etaSeconds\":" + eta
+                        + ",\"status\":\"" + state.status + "\"}\n\n";
+                out.write(event.getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                if (!p2p.transfer.UploadProgressRegistry.IN_PROGRESS.equals(state.status)) {
+                    return; // COMPLETED / FAILED: final event sent, close stream
+                }
+                lastBytes = bytes;
+                lastAtMs = now;
+                try {
+                    Thread.sleep(500);
+                } catch (InterruptedException e) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
         }
     }
 
@@ -496,6 +591,8 @@ public final class ApiRouter {
         AuthContext ctx = require(exchange);
         Entitlements plan = plans.entitlementsFor(ctx.userId());
         Map<String, Object> entitlements = new java.util.LinkedHashMap<>();
+        entitlements.put("uploadSpeedBytesPerSecond", plan.uploadSpeedBytesPerSecond());
+        entitlements.put("uploadSpeedLabel", plan.uploadSpeedLabel());
         entitlements.put("maxFileBytes", plan.maxFileBytes());
         entitlements.put("maxStorageBytes", plan.maxStorageBytes());
         entitlements.put("maxActiveLinks", plan.maxActiveLinks());
@@ -698,6 +795,7 @@ public final class ApiRouter {
                 ? route.substring(0, route.length() - 1) : route;
         List<Map.Entry<Pattern, String>> rewrites = List.of(
                 Map.entry(Pattern.compile("^/requests/[^/]+$"), "/requests/{id}"),
+                Map.entry(Pattern.compile("^/uploads/[^/]+/progress$"), "/uploads/{id}/progress"),
                 Map.entry(Pattern.compile("^/links/[^/]+/revoke$"), "/links/{slug}/revoke"),
                 Map.entry(Pattern.compile("^/links/[^/]+/stats$"), "/links/{slug}/stats"),
                 Map.entry(Pattern.compile("^/links/(?!upload$)[^/]+$"), "/links/{slug}"),

@@ -24,9 +24,26 @@ public record Entitlements(
         int maxConcurrentTransfers,
         int historyEntries,                  // Integer.MAX_VALUE = unlimited
         int maxTrustedDevices,               // Integer.MAX_VALUE = unlimited
-        boolean ecosystemSync) {             // clipboard/photo/folder sync
+        boolean ecosystemSync,               // clipboard/photo/folder sync
+        long uploadSpeedBytesPerSecond) {    // Long.MAX_VALUE = unlimited
 
     private static final long GB = 1L << 30;
+
+    /** True when upload speed is capped (FREE tier). */
+    public boolean isThrottled() {
+        return uploadSpeedBytesPerSecond != Long.MAX_VALUE;
+    }
+
+    /** Human label for the speed cap: "2 MB/s", "500 KB/s", "Unlimited". */
+    public String uploadSpeedLabel() {
+        if (uploadSpeedBytesPerSecond == Long.MAX_VALUE) {
+            return "Unlimited";
+        }
+        if (uploadSpeedBytesPerSecond >= 1_000_000) {
+            return (uploadSpeedBytesPerSecond / 1_000_000) + " MB/s";
+        }
+        return (uploadSpeedBytesPerSecond / 1_000) + " KB/s";
+    }
 
     /**
      * FREE: Direct + Nearby unlimited (they never touch storage, so no
@@ -49,7 +66,8 @@ public record Entitlements(
             3,                  // concurrent transfers
             100,                // basic history
             5,                  // trusted devices
-            false);             // no ecosystem sync
+            false,              // no ecosystem sync
+            2L * 1024 * 1024);  // 2 MB/s upload throttle
 
     /** PREMIUM: storage varies by subscription tier (500 GB / 1 TB / 2 TB). */
     public static Entitlements premium(long storageBytes) {
@@ -69,6 +87,7 @@ public record Entitlements(
                 10,                          // priority / more concurrency
                 Integer.MAX_VALUE,           // unlimited history
                 Integer.MAX_VALUE,           // unlimited devices
-                true);                       // ecosystem sync
+                true,                        // ecosystem sync
+                Long.MAX_VALUE);             // unlimited upload speed
     }
 }

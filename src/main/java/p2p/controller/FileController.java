@@ -261,6 +261,7 @@ public class FileController {
                 planService, rateLimiter, metrics);
         apiRouter.setHealth(healthService);
         apiRouter.setWebSocketPort(boundPort + 1);
+        apiRouter.setUploadProgress(new p2p.transfer.UploadProgressRegistry());
 
         server.createContext("/upload", new UploadHandler());
         server.createContext("/download", new DownloadHandler());
@@ -374,20 +375,65 @@ public class FileController {
         }
     }
 
+    /** Fallback context: serves the upload page and /ui/* static, else 404. */
     private class CORSHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             if (handlePreflight(exchange)) {
                 return;
             }
+            String path = exchange.getRequestURI().getPath();
+            if (exchange.getRequestMethod().equalsIgnoreCase("GET")) {
+                if (path.equals("/") || path.equals("/upload")) {
+                    if (serveStatic(exchange, "upload.html")) {
+                        return;
+                    }
+                } else if (path.startsWith("/ui/")) {
+                    String name = path.substring("/ui/".length());
+                    // Flat directory only: no separators, no traversal.
+                    if (!name.contains("/") && !name.contains("\\") && !name.contains("..")
+                            && serveStatic(exchange, name)) {
+                        return;
+                    }
+                }
+            }
             sendText(exchange, 404, "Not Found");
         }
+    }
+
+    /** ui/ directory on disk (override with -Dfylo.ui.dir=…). */
+    private static final Path UI_DIR = Path.of(System.getProperty("fylo.ui.dir", "ui"));
+
+    private boolean serveStatic(HttpExchange exchange, String fileName) throws IOException {
+        Path file = UI_DIR.resolve(fileName);
+        if (!Files.isRegularFile(file)) {
+            return false;
+        }
+        String contentType = fileName.endsWith(".html") ? "text/html; charset=utf-8"
+                : fileName.endsWith(".css") ? "text/css"
+                : fileName.endsWith(".js") ? "text/javascript"
+                : fileName.endsWith(".svg") ? "image/svg+xml"
+                : "application/octet-stream";
+        byte[] bytes = Files.readAllBytes(file);
+        exchange.getResponseHeaders().set("Content-Type", contentType);
+        exchange.sendResponseHeaders(200, bytes.length);
+        try (OutputStream out = exchange.getResponseBody()) {
+            out.write(bytes);
+        }
+        return true;
     }
 
     private class UploadHandler implements HttpHandler {
         @Override
         public void handle(HttpExchange exchange) throws IOException {
             if (handlePreflight(exchange)) {
+                return;
+            }
+            if (exchange.getRequestMethod().equalsIgnoreCase("GET")) {
+                // GET /upload serves the upload page (backbone frontend).
+                if (!serveStatic(exchange, "upload.html")) {
+                    sendText(exchange, 404, "Not Found");
+                }
                 return;
             }
             if (!exchange.getRequestMethod().equalsIgnoreCase("POST")) {
