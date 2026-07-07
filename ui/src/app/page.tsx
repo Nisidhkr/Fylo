@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import axios from 'axios';
 import FileUpload from '@/components/FileUpload';
 import FileDownload from '@/components/FileDownload';
@@ -8,23 +8,25 @@ import InviteCode from '@/components/InviteCode';
 import NearbyDevices from '@/components/NearbyDevices';
 import IncomingOffers from '@/components/IncomingOffers';
 import TransfersPanel from '@/components/TransfersPanel';
+import AuthPanel from '@/components/AuthPanel';
+import PeoplePanel from '@/components/PeoplePanel';
+import LinksPanel from '@/components/LinksPanel';
+import { getSession, formatBytes } from '@/lib/api';
 
 export interface Share {
   port: number;
   token: string;
 }
 
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ['KB', 'MB', 'GB', 'TB'];
-  let value = bytes;
-  let unit = -1;
-  do {
-    value /= 1024;
-    unit++;
-  } while (value >= 1024 && unit < units.length - 1);
-  return `${value.toFixed(1)} ${units[unit]}`;
-}
+type Tab = 'direct' | 'nearby' | 'people' | 'links' | 'transfers';
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: 'direct', label: 'Direct' },
+  { id: 'nearby', label: 'Nearby' },
+  { id: 'people', label: 'People' },
+  { id: 'links', label: 'Links' },
+  { id: 'transfers', label: 'Transfers' },
+];
 
 export default function Home() {
   const [uploadedFile, setUploadedFile] = useState<File | null>(null);
@@ -32,7 +34,17 @@ export default function Home() {
   const [uploadPercent, setUploadPercent] = useState(0);
   const [isDownloading, setIsDownloading] = useState(false);
   const [share, setShare] = useState<Share | null>(null);
-  const [activeTab, setActiveTab] = useState<'send' | 'receive' | 'nearby' | 'transfers'>('send');
+  const [activeTab, setActiveTab] = useState<Tab>('direct');
+  const [showAuth, setShowAuth] = useState(false);
+  const [username, setUsername] = useState<string | null>(null);
+
+  // Keep the header in sync with the session (login/logout in any panel).
+  useEffect(() => {
+    const sync = () => setUsername(getSession()?.username ?? null);
+    sync();
+    window.addEventListener('fylo-session', sync);
+    return () => window.removeEventListener('fylo-session', sync);
+  }, []);
 
   const handleFileUpload = async (file: File) => {
     setUploadedFile(file);
@@ -97,7 +109,7 @@ export default function Home() {
     }
   };
 
-  const tabClass = (tab: 'send' | 'receive' | 'nearby' | 'transfers') =>
+  const tabClass = (tab: Tab) =>
     `flex-1 py-2.5 text-sm transition-colors ${
       activeTab === tab
         ? 'border-b-2 border-neutral-900 text-neutral-900 font-medium'
@@ -106,62 +118,76 @@ export default function Home() {
 
   return (
     <div className="mx-auto max-w-md px-6 py-16">
-      <header className="mb-10 text-center">
-        <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">PeerLink</h1>
-        <p className="mt-1 text-sm text-neutral-500">Peer-to-peer file sharing</p>
+      <header className="mb-8">
+        <div className="flex items-baseline justify-between">
+          <h1 className="text-2xl font-semibold tracking-tight text-neutral-900">Fylo</h1>
+          <button
+            className="text-sm text-neutral-400 hover:text-neutral-700"
+            onClick={() => setShowAuth((v) => !v)}
+          >
+            {username ? `@${username}` : 'Sign in'}
+          </button>
+        </div>
+        <p className="mt-1 text-sm text-neutral-500">One place to share files — any way.</p>
       </header>
 
-      <div className="mb-8 flex">
-        <button className={tabClass('send')} onClick={() => setActiveTab('send')}>
-          Send
-        </button>
-        <button className={tabClass('receive')} onClick={() => setActiveTab('receive')}>
-          Receive
-        </button>
-        <button className={tabClass('nearby')} onClick={() => setActiveTab('nearby')}>
-          Nearby
-        </button>
-        <button className={tabClass('transfers')} onClick={() => setActiveTab('transfers')}>
-          Transfers
-        </button>
-      </div>
-
-      {activeTab === 'send' && (
-        <div className="space-y-4">
-          <FileUpload onFileUpload={handleFileUpload} isUploading={isUploading} />
-
-          {uploadedFile && (
-            <p className="text-sm text-neutral-500">
-              {uploadedFile.name}
-              <span className="text-neutral-400"> · {formatSize(uploadedFile.size)}</span>
-            </p>
-          )}
-
-          {isUploading && (
-            <div>
-              <div className="h-1 w-full overflow-hidden rounded bg-neutral-100">
-                <div
-                  className="h-full bg-neutral-900 transition-all"
-                  style={{ width: `${uploadPercent}%` }}
-                />
-              </div>
-              <p className="mt-2 text-xs text-neutral-400">Uploading… {uploadPercent}%</p>
-            </div>
-          )}
-
-          <InviteCode share={share} />
+      {showAuth && (
+        <div className="mb-8">
+          <AuthPanel onDone={() => setShowAuth(false)} />
         </div>
       )}
-      {activeTab === 'receive' && (
-        <FileDownload onDownload={handleDownload} isDownloading={isDownloading} />
+
+      <div className="mb-8 flex">
+        {TABS.map((tab) => (
+          <button key={tab.id} className={tabClass(tab.id)} onClick={() => setActiveTab(tab.id)}>
+            {tab.label}
+          </button>
+        ))}
+      </div>
+
+      {activeTab === 'direct' && (
+        <div className="space-y-10">
+          <section className="space-y-4">
+            <h2 className="text-sm font-medium text-neutral-900">Send</h2>
+            <FileUpload onFileUpload={handleFileUpload} isUploading={isUploading} />
+
+            {uploadedFile && (
+              <p className="text-sm text-neutral-500">
+                {uploadedFile.name}
+                <span className="text-neutral-400"> · {formatBytes(uploadedFile.size)}</span>
+              </p>
+            )}
+
+            {isUploading && (
+              <div>
+                <div className="h-1 w-full overflow-hidden rounded bg-neutral-100">
+                  <div
+                    className="h-full bg-neutral-900 transition-all"
+                    style={{ width: `${uploadPercent}%` }}
+                  />
+                </div>
+                <p className="mt-2 text-xs text-neutral-400">Uploading… {uploadPercent}%</p>
+              </div>
+            )}
+
+            <InviteCode share={share} />
+          </section>
+
+          <section className="space-y-4">
+            <h2 className="text-sm font-medium text-neutral-900">Receive</h2>
+            <FileDownload onDownload={handleDownload} isDownloading={isDownloading} />
+          </section>
+        </div>
       )}
       {activeTab === 'nearby' && <NearbyDevices />}
+      {activeTab === 'people' && <PeoplePanel />}
+      {activeTab === 'links' && <LinksPanel />}
       {activeTab === 'transfers' && <TransfersPanel />}
 
       <IncomingOffers />
 
       <footer className="mt-16 text-center text-xs text-neutral-300">
-        PeerLink © {new Date().getFullYear()}
+        Fylo © {new Date().getFullYear()} — direct · nearby · people · links
       </footer>
     </div>
   );

@@ -2,6 +2,8 @@
 
 // Override with BACKEND_URL if the Java server runs on a non-default port,
 // e.g. `BACKEND_URL=http://localhost:8080 npm run dev`.
+// NOTE: for production (`next build` + `next start`) the rewrite targets are
+// baked at BUILD time — set BACKEND_URL when running `npm run build`.
 const backendUrl = process.env.BACKEND_URL ?? 'http://localhost:9090';
 
 const nextConfig = {
@@ -28,6 +30,16 @@ const nextConfig = {
       {
         source: '/api/transfers/:path*',
         destination: `${backendUrl}/transfers/:path*`,
+      },
+      // Unified platform API (auth, users, requests, links, plan)
+      {
+        source: '/api/v1/:path*',
+        destination: `${backendUrl}/api/v1/:path*`,
+      },
+      // Public link downloads
+      {
+        source: '/s/:slug',
+        destination: `${backendUrl}/s/:slug`,
       },
     ];
   },

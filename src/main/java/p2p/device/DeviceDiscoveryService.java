@@ -18,10 +18,10 @@ import java.util.concurrent.ConcurrentHashMap;
  * Bonjour on macOS/iOS and NSD on Android), using the pure-Java JmDNS
  * implementation so the same code runs on Windows, Linux, and macOS.
  *
- * <p>Each node registers {@code _peerlink._tcp.local.} with its API port and
- * identity in TXT records, and browses for the same type. Discovered peers go
- * into the {@link DeviceRegistry}; departure events and the
- * {@link HeartbeatService} take them offline again.
+ * <p>Each node registers {@code _fylo._tcp.local.} (backbone §7.3) with its
+ * API port and identity in TXT records, and browses for the same type.
+ * Discovered peers go into the {@link DeviceRegistry}; departure events and
+ * the {@link HeartbeatService} take them offline again.
  *
  * <p>Discovery is best-effort: on networks where multicast is filtered
  * (some corporate Wi-Fi, WSL2 NAT), the rest of the application keeps working
@@ -29,7 +29,7 @@ import java.util.concurrent.ConcurrentHashMap;
  */
 public final class DeviceDiscoveryService implements Closeable {
 
-    public static final String SERVICE_TYPE = "_peerlink._tcp.local.";
+    public static final String MDNS_SERVICE_TYPE = "_fylo._tcp.local.";
 
     private final DeviceIdentity identity;
     private final DeviceRegistry registry;
@@ -53,11 +53,13 @@ public final class DeviceDiscoveryService implements Closeable {
         txt.put("name", identity.name());
         txt.put("os", identity.os());
         txt.put("type", identity.type());
-        txt.put("v", "1");
+        // Backbone §7.3 TXT record fields.
+        txt.put("version", "1.0.0");
+        txt.put("capabilities", "SEND,RECEIVE,ECOSYSTEM");
         String serviceName = identity.name() + "-" + identity.deviceId().substring(0, 8);
-        jmdns.registerService(ServiceInfo.create(SERVICE_TYPE, serviceName, apiPort, 0, 0, txt));
+        jmdns.registerService(ServiceInfo.create(MDNS_SERVICE_TYPE, serviceName, apiPort, 0, 0, txt));
 
-        jmdns.addServiceListener(SERVICE_TYPE, new ServiceListener() {
+        jmdns.addServiceListener(MDNS_SERVICE_TYPE, new ServiceListener() {
             @Override
             public void serviceAdded(ServiceEvent event) {
                 // Ask for resolution; serviceResolved fires with addresses + TXT.

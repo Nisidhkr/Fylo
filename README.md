@@ -38,20 +38,39 @@ Plus the original internet mode:
 
 ## Project Structure
 
-- `src/main/java/p2p`: Java backend
-  - `App.java` — entry point
+- `src/main/java/p2p`: Java backend (the unified Fylo platform — see
+  [docs/UNIFIED-PLATFORM.md](docs/UNIFIED-PLATFORM.md))
+  - `App.java` — entry point (one server, one JVM)
   - `controller/FileController.java` — HTTP gateway (`/upload`, `/download`,
-    `/lan/*`, `/transfers`)
+    `/lan/*`, `/transfers`) and composition root
+  - `api/ApiRouter.java` — unified API (`/api/v1/**`: auth, users,
+    notifications, transfer requests, links, devices, pairing; `/s/{slug}`
+    public link downloads)
+  - `engine/` — the ONE transfer engine facade (`TransferEngine`,
+    `TransferSource`, `ShareCodes`)
   - `service/FileSharer.java` — registry of active shares
   - `protocol/` — binary wire protocol (frames, manifest, errors)
   - `transfer/` — `FileSender`, `FileReceiver`, `PeerClient`,
     `TransferManager` (queue/pause/resume), resume state, progress tracking,
     network tuning presets
-  - `device/` — identity, registry, mDNS discovery, presence/heartbeats
+  - `share/` — mode services: Direct (codes/QR), Username (request/accept),
+    Link (cloud links, 2-day default expiry); Nearby lives in `lan/`
+  - `auth/` — JWT (HS256), PBKDF2 password hashing, refresh-token rotation
+  - `user/` — accounts, @username search, presence, notifications, history
+  - `storage/` — `StorageProvider` seam + local implementation (S3/MinIO later)
+  - `device/` — identity, registry, mDNS discovery, presence/heartbeats,
+    QR pairing, trusted-device policy
   - `lan/` — offers, approval, device-to-device control plane
   - `security/` — transfer tokens
 - `ui/`: Next.js frontend (`src/app`, `src/components`)
-- `docs/`: [PROTOCOL.md](docs/PROTOCOL.md) (wire format),
+- `db/migrations/`: PostgreSQL schema (the ONE database; applied by compose
+  and CI)
+- `deploy/`: Prometheus/Grafana provisioning for the compose stack
+- `docs/`: [UNIFIED-PLATFORM.md](docs/UNIFIED-PLATFORM.md) (Part 1
+  architecture, diagrams, migration plan),
+  [UNIFIED-PLATFORM-PART2.md](docs/UNIFIED-PLATFORM-PART2.md) (storage, DB,
+  security, plans, scaling, observability), [openapi.yaml](docs/openapi.yaml)
+  (OpenAPI 3.1 / Swagger spec), [PROTOCOL.md](docs/PROTOCOL.md) (wire format),
   [ARCHITECTURE.md](docs/ARCHITECTURE.md) (design, performance, security)
 
 ## Prerequisites
@@ -184,6 +203,49 @@ presets), and benchmark numbers.
 - Not yet included (recommended for hostile networks): TLS, token expiry,
   rate limiting — see the security section of
   [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)
+
+## What's Running
+
+One backend process serves everything:
+
+| Surface | Where |
+|---|---|
+| REST API (all four modes) | `http://localhost:9090` — `/api/v1/**` per [docs/openapi.yaml](docs/openapi.yaml) |
+| Gateway (legacy UI routes) | `/upload`, `/download/{port}`, `/lan/*`, `/transfers` |
+| Public link downloads | `GET /s/{slug}` (Range supported) |
+| WebSocket events | `ws://localhost:9091/ws/events?token=<accessToken>` (RFC 6455; `GET /ws/events` on 9090 answers 426 with this URL) |
+| Health (K8s probes) | `GET /health` and `GET /actuator/health` |
+| Prometheus metrics | `GET /metrics` |
+
+Environment variables (all optional — defaults give a zero-infra single node):
+
+| Variable | Values | Default |
+|---|---|---|
+| `FYLO_STORAGE` | `local` \| `minio` \| `s3` | `local` |
+| `DATABASE_URL` | `jdbc:postgresql://…` | none → JSON files |
+| `DATABASE_USER` / `DATABASE_PASSWORD` | string | `fylo` / empty |
+| `REDIS_URL` | `redis://…` | none → in-memory |
+| `S3_ENDPOINT` / `S3_REGION` / `S3_BUCKET` | url / region / name | none |
+| `S3_ACCESS_KEY` / `S3_SECRET_KEY` | string | none |
+| `PORT` | number | `9090` (WebSocket = PORT+1) |
+| `FYLO_BLOCK_EXECUTABLES` | `true` \| `false` | `true` |
+
+Quick start (plain Java, no Docker):
+
+```bash
+mvn package -DskipTests
+java -jar target/p2p-1.0-SNAPSHOT.jar
+```
+
+Quick start (full stack — Postgres, MinIO, Redis-ready, Prometheus, Grafana):
+
+```bash
+docker compose up --build
+```
+
+Load tests (Gatling, against a running backend): `mvn gatling:test
+-Dgatling.simulationClass=p2p.load.FyloLoadSimulation`. Kubernetes
+manifests for production live in [k8s/](k8s/) (`kubectl apply -k k8s/`).
 
 ## Deployment
 

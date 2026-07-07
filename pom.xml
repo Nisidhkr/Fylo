@@ -53,12 +53,92 @@
       <artifactId>jackson-databind</artifactId>
       <version>2.17.2</version>
     </dependency>
+    <!-- Instant/Duration support for persisted records -->
+    <dependency>
+      <groupId>com.fasterxml.jackson.datatype</groupId>
+      <artifactId>jackson-datatype-jsr310</artifactId>
+      <version>2.17.2</version>
+    </dependency>
     <!-- Silence JmDNS's SLF4J "no provider" warning -->
     <dependency>
       <groupId>org.slf4j</groupId>
       <artifactId>slf4j-nop</artifactId>
       <version>2.0.13</version>
       <scope>runtime</scope>
+    </dependency>
+    <!-- Test diagnostics (activate with -Dslf4j.provider=org.slf4j.simple.SimpleServiceProvider) -->
+    <dependency>
+      <groupId>org.slf4j</groupId>
+      <artifactId>slf4j-simple</artifactId>
+      <version>2.0.13</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- S3-compatible object storage (AWS S3 and MinIO share this client) -->
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>s3</artifactId>
+      <version>2.29.45</version>
+      <exclusions>
+        <!-- Use the JDK's HttpClient; keeps the shaded jar lean -->
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>netty-nio-client</artifactId>
+        </exclusion>
+        <exclusion>
+          <groupId>software.amazon.awssdk</groupId>
+          <artifactId>apache-client</artifactId>
+        </exclusion>
+      </exclusions>
+    </dependency>
+    <dependency>
+      <groupId>software.amazon.awssdk</groupId>
+      <artifactId>url-connection-client</artifactId>
+      <version>2.29.45</version>
+    </dependency>
+    <!-- PostgreSQL driver: used when DATABASE_URL is configured -->
+    <dependency>
+      <groupId>org.postgresql</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>42.7.4</version>
+    </dependency>
+    <!-- Redis: rate limits, sessions, presence, WS pub/sub (optional at runtime) -->
+    <dependency>
+      <groupId>redis.clients</groupId>
+      <artifactId>jedis</artifactId>
+      <version>5.1.3</version>
+    </dependency>
+    <!-- Testcontainers: integration tests against real Postgres + MinIO.
+         1.21.x needed for Docker Engine 29 (min API 1.44). -->
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>testcontainers</artifactId>
+      <version>1.21.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>junit-jupiter</artifactId>
+      <version>1.21.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>postgresql</artifactId>
+      <version>1.21.4</version>
+      <scope>test</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.testcontainers</groupId>
+      <artifactId>minio</artifactId>
+      <version>1.21.4</version>
+      <scope>test</scope>
+    </dependency>
+    <!-- Gatling load tests (compiled/run via mvn gatling:test, not surefire) -->
+    <dependency>
+      <groupId>io.gatling.highcharts</groupId>
+      <artifactId>gatling-charts-highcharts</artifactId>
+      <version>3.11.3</version>
+      <scope>test</scope>
     </dependency>
     <dependency>
       <groupId>org.junit.jupiter</groupId>
@@ -154,6 +234,12 @@
             </configuration>
           </execution>
         </executions>
+      </plugin>
+      <!-- Load tests: mvn gatling:test (not part of the default lifecycle) -->
+      <plugin>
+        <groupId>io.gatling</groupId>
+        <artifactId>gatling-maven-plugin</artifactId>
+        <version>4.9.6</version>
       </plugin>
       <plugin>
         <groupId>org.apache.maven.plugins</groupId>
