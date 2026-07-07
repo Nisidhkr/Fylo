@@ -4,7 +4,7 @@
 // e.g. `BACKEND_URL=http://localhost:8080 npm run dev`.
 // NOTE: for production (`next build` + `next start`) the rewrite targets are
 // baked at BUILD time — set BACKEND_URL when running `npm run build`.
-const backendUrl = process.env.BACKEND_URL ?? 'http://localhost:9090';
+const backendUrl = process.env.BACKEND_URL ?? 'http://localhost:7000';
 
 const nextConfig = {
   reactStrictMode: true,

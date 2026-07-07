@@ -9,7 +9,7 @@ import java.io.IOException;
 public class App {
     public static void main(String[] args) {
         // Port precedence: first CLI arg > PORT env var > 9090.
-        int port = 9091;
+        int port = 7000;
         if (args.length > 0) {
             port = Integer.parseInt(args[0]);
         } else if (System.getenv("PORT") != null) {
